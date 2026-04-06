@@ -50,5 +50,15 @@ with st.sidebar:
         st.session_state.user_name = None
         st.rerun()
 
-# ── Redirect to dashboard ───────────────────────────────────────────────────
-st.switch_page("pages/1_Dashboard.py")
+# ── Welcome screen after login ──────────────────────────────────────────────
+st.title("🚲 Enroute IMS")
+st.success(f"Bienvenido, **{st.session_state.user_name}**")
+st.markdown("Selecciona un módulo en el menú de la izquierda para comenzar.")
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.info("**📊 Dashboard**\nVista general de existencias, KPIs y alertas.")
+with col2:
+    st.info("**📦 Inventory Control**\nSube Excel para ajustar inventario en Shopify.")
+with col3:
+    st.info("**📋 PO Tracker**\nGestiona Purchase Orders y recepciones.")
