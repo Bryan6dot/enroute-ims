@@ -3,11 +3,7 @@ import pandas as pd
 import io, sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-st.set_page_config(page_title="PO Tracker · Enroute IMS", layout="wide")
 
-if not st.session_state.get("user_role"):
-    st.warning("⚠️ Inicia sesión desde la página principal.")
-    st.stop()
 
 DEMO_POS = [
     {
