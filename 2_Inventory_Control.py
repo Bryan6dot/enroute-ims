@@ -3,11 +3,7 @@ import pandas as pd
 import io, sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-st.set_page_config(page_title="Inventory Control · Enroute IMS", layout="wide")
 
-if not st.session_state.get("user_role"):
-    st.warning("⚠️ Inicia sesión desde la página principal.")
-    st.stop()
 
 INVENTORY = {
     "TRK-FX3-L":  {"desc": "Trek FX3 Disc Large",        "Central": 12, "Store1": 2, "Store2": 0},
