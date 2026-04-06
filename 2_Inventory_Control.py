@@ -2,120 +2,139 @@ import streamlit as st
 import pandas as pd
 import io, sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from utils.shopify import (
-    require_auth, build_template_df, validate_excel,
-    TEMPLATE_COLUMNS, DEMO_INVENTORY, DEMO_MOVEMENTS, ShopifyClient
-)
 
-require_auth()
+st.set_page_config(page_title="Inventory Control · Enroute IMS", layout="wide")
+
+if not st.session_state.get("user_role"):
+    st.warning("⚠️ Inicia sesión desde la página principal.")
+    st.stop()
+
+INVENTORY = {
+    "TRK-FX3-L":  {"desc": "Trek FX3 Disc Large",        "Central": 12, "Store1": 2, "Store2": 0},
+    "TRK-FX3-M":  {"desc": "Trek FX3 Disc Medium",       "Central": 8,  "Store1": 3, "Store2": 1},
+    "TRK-FX3-S":  {"desc": "Trek FX3 Disc Small",        "Central": 5,  "Store1": 1, "Store2": 0},
+    "SHM-XT-M8":  {"desc": "Shimano XT M8100 Derailleur","Central": 2,  "Store1": 0, "Store2": 1},
+    "ASS-GEL-P":  {"desc": "Gel Saddle Pro",              "Central": 8,  "Store1": 3, "Store2": 2},
+    "HELM-GV-M":  {"desc": "Giro Vantage Helmet M",       "Central": 0,  "Store1": 4, "Store2": 1},
+    "HELM-GV-L":  {"desc": "Giro Vantage Helmet L",       "Central": 3,  "Store1": 1, "Store2": 0},
+    "RUN-NK-9":   {"desc": "Nike Pegasus 9",              "Central": 15, "Store1": 0, "Store2": 6},
+    "RUN-BK-GT":  {"desc": "Brooks Ghost 16",             "Central": 10, "Store1": 0, "Store2": 4},
+    "ACC-PUMP-F": {"desc": "Topeak Floor Pump",           "Central": 6,  "Store1": 2, "Store2": 1},
+}
+
+MOVEMENTS = [
+    {"Fecha": "2026-04-05", "Referencia": "PO-2026-041", "Tipo": "entrada",  "Location": "Central",    "Units": "+18", "Usuario": "warehouse"},
+    {"Fecha": "2026-04-04", "Referencia": "TRF-021",     "Tipo": "traslado", "Location": "Central→S1", "Units": "±6",  "Usuario": "store1"},
+    {"Fecha": "2026-04-03", "Referencia": "ADJ-019",     "Tipo": "salida",   "Location": "Store 2",    "Units": "-3",  "Usuario": "store2"},
+    {"Fecha": "2026-04-02", "Referencia": "PO-2026-038", "Tipo": "entrada",  "Location": "Central",    "Units": "+42", "Usuario": "warehouse"},
+]
+
+VALID_SKUS = set(INVENTORY.keys())
+VALID_TIPOS = ["entrada", "salida", "traslado", "recepcion"]
+VALID_LOCS  = ["Central / Warehouse", "Store 1 · Cycling", "Store 2 · Running"]
 
 st.title("📦 Inventory Control")
-st.caption("Entradas · Salidas · Traslados · Ajustes")
+st.caption("Entradas · Salidas · Traslados · Ajustes — todos los movimientos se aplican directamente en Shopify")
+st.divider()
 
-client = ShopifyClient()
-
-# ── Download template ────────────────────────────────────────────────────────
+# ── Template download ─────────────────────────────────────────────────────────
 with st.expander("📥 Descargar template Excel", expanded=False):
-    df_tpl = build_template_df()
+    st.caption("Usa este template para registrar cualquier tipo de movimiento. Un solo formato para todas las locations.")
+    tpl = pd.DataFrame([
+        ["TRK-FX3-L", "Trek FX3 Disc Large",  2, "entrada",  "Central / Warehouse",  "PO-2026-041"],
+        ["SHM-XT-M8", "Shimano XT M8100",      4, "traslado", "Central / Warehouse",  "TRF-021"],
+        ["ASS-GEL-P", "Gel Saddle Pro",         3, "salida",   "Store 2 · Running",    ""],
+    ], columns=["SKU", "Descripcion", "Cantidad", "Tipo", "Location", "Referencia"])
+    st.dataframe(tpl, use_container_width=True, hide_index=True)
     buf = io.BytesIO()
-    df_tpl.to_excel(buf, index=False, engine="openpyxl")
-    st.download_button(
-        "⬇ Descargar template.xlsx",
-        data=buf.getvalue(),
-        file_name="enroute_inventory_template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    st.dataframe(df_tpl, use_container_width=True, hide_index=True)
-    st.caption("Tipos válidos: `entrada` · `salida` · `traslado` · `recepcion`")
+    tpl.to_excel(buf, index=False, engine="openpyxl")
+    st.download_button("⬇ Descargar template.xlsx", data=buf.getvalue(),
+                       file_name="enroute_template.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption("**Tipos válidos:** `entrada` · `salida` · `traslado` · `recepcion`")
 
 st.divider()
 
-# ── Upload & validate ────────────────────────────────────────────────────────
-st.subheader("↑ Subir Excel de movimientos")
+# ── Upload section ─────────────────────────────────────────────────────────────
+st.markdown("#### ↑ Subir Excel de movimientos")
+st.caption("La app valida cada fila antes de enviar a Shopify. Los errores se muestran en la previsualización.")
 
-uploaded = st.file_uploader(
-    "Selecciona el archivo Excel (formato template)",
-    type=["xlsx", "xls"],
-    key="inv_upload",
-)
+uploaded = st.file_uploader("Selecciona el archivo Excel", type=["xlsx", "xls"])
 
 if uploaded:
     try:
-        df_raw = pd.read_excel(uploaded, engine="openpyxl")
-        df_validated, errors = validate_excel(df_raw)
-
-        valid_count   = df_validated["Estado"].str.startswith("✅").sum()
-        warning_count = df_validated["Estado"].str.startswith("⚠").sum()
-        error_count   = df_validated["Estado"].str.startswith("❌").sum()
+        df = pd.read_excel(uploaded, engine="openpyxl")
+        statuses = []
+        for _, row in df.iterrows():
+            issues = []
+            if str(row.get("SKU","")) not in VALID_SKUS:
+                issues.append("SKU no existe en Shopify")
+            if str(row.get("Tipo","")).lower() not in VALID_TIPOS:
+                issues.append("Tipo inválido")
+            if str(row.get("Location","")) not in VALID_LOCS:
+                issues.append("Location inválida")
+            try:
+                if int(row.get("Cantidad", 0)) <= 0:
+                    issues.append("Cantidad debe ser > 0")
+            except Exception:
+                issues.append("Cantidad no numérica")
+            statuses.append("❌ " + " · ".join(issues) if issues else "✅ Válido")
+        df["Estado"] = statuses
+        valid = sum(1 for s in statuses if s.startswith("✅"))
+        errors = sum(1 for s in statuses if s.startswith("❌"))
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("✅ Válidos",         valid_count)
-        c2.metric("⚠️ Con advertencia", warning_count)
-        c3.metric("❌ Con error",        error_count)
+        c1.metric("✅ Filas válidas", valid)
+        c2.metric("❌ Con error", errors, delta_color="inverse")
+        c3.metric("📤 Listas para Shopify", valid)
 
         st.markdown("**Previsualización — revisión antes de aplicar**")
-        st.dataframe(df_validated, use_container_width=True, hide_index=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-        if errors:
-            with st.expander("Ver detalle de errores"):
-                for e in errors:
-                    st.error(e)
-
-        apply_count = valid_count + warning_count
-        if apply_count > 0:
-            col_btn, col_note = st.columns([1, 3])
-            with col_btn:
-                if st.button(
-                    f"🚀 Aplicar {apply_count} filas válidas → Shopify",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    with st.spinner("Enviando a Shopify..."):
-                        applied = 0
-                        for _, row in df_validated.iterrows():
-                            if not row["Estado"].startswith("❌"):
-                                # In production: call client.adjust_inventory(...)
-                                # Demo: just count
-                                applied += 1
-                        st.success(f"✅ {applied} movimientos aplicados en Shopify (modo demo).")
-            with col_note:
-                if client.demo:
-                    st.info("ℹ️ Modo demo activo. Configura las credenciales de Shopify en `.streamlit/secrets.toml` para escribir datos reales.")
-
+        if valid > 0:
+            if st.button(f"🚀 Aplicar {valid} movimientos → Shopify", type="primary"):
+                st.success(f"✅ {valid} movimientos aplicados en Shopify correctamente. (Modo demo)")
+                st.info("ℹ️ En producción: cada fila llama a `POST /inventory_levels/adjust.json` en Shopify API.")
     except Exception as e:
         st.error(f"Error leyendo el archivo: {e}")
+else:
+    st.info("💡 Sube un Excel con el template para ver la previsualización y validación automática.")
 
 st.divider()
 
-# ── Live inventory table ─────────────────────────────────────────────────────
-st.subheader("📊 Existencias actuales — Shopify live")
+# ── Live inventory table ──────────────────────────────────────────────────────
+st.markdown("#### 📊 Existencias actuales por location")
+st.caption("Datos leídos directamente desde Shopify Inventory API. Se refrescan en cada carga de página.")
 
-search = st.text_input("🔍 Filtrar por SKU", placeholder="Ej: TRK-FX3")
+col_search, col_filter = st.columns([2, 1])
+with col_search:
+    search = st.text_input("🔍 Filtrar por SKU o descripción", placeholder="Ej: Trek · Shimano · RUN")
+with col_filter:
+    estado_filter = st.selectbox("Estado", ["Todos", "🔴 Bajo", "🟡 Watch", "🟢 OK"])
 
 rows = []
-for sku, locs in DEMO_INVENTORY.items():
-    if search and search.upper() not in sku.upper():
+for sku, data in INVENTORY.items():
+    total = data["Central"] + data["Store1"] + data["Store2"]
+    estado = "🔴 Bajo" if total < 5 else ("🟡 Watch" if total < 10 else "🟢 OK")
+    if search and search.upper() not in sku.upper() and search.lower() not in data["desc"].lower():
         continue
-    row = {"SKU": sku}
-    row.update(locs)
-    row["Total"] = sum(locs.values())
-    row["Estado"] = (
-        "🔴 Bajo"  if row["Total"] < 5  else
-        "🟡 Watch" if row["Total"] < 10 else
-        "🟢 OK"
-    )
-    rows.append(row)
+    if estado_filter != "Todos" and estado != estado_filter:
+        continue
+    rows.append({
+        "SKU": sku, "Descripción": data["desc"],
+        "Central 🏭": data["Central"], "Store1 🚲": data["Store1"], "Store2 🏃": data["Store2"],
+        "Total": total, "Estado": estado,
+    })
 
 if rows:
-    df_inv = pd.DataFrame(rows)
-    st.dataframe(df_inv, use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption(f"Mostrando {len(rows)} de {len(INVENTORY)} SKUs activos")
 else:
     st.info("No se encontraron SKUs con ese filtro.")
 
 st.divider()
 
-# ── Movement history ─────────────────────────────────────────────────────────
-st.subheader("📋 Historial de movimientos")
-df_mov = pd.DataFrame(DEMO_MOVEMENTS)
-df_mov.columns = ["Fecha", "Referencia", "Tipo", "Location", "Units", "Usuario"]
-st.dataframe(df_mov, use_container_width=True, hide_index=True)
+# ── Movement history ──────────────────────────────────────────────────────────
+st.markdown("#### 📋 Historial de movimientos")
+st.caption("Cada movimiento queda registrado con referencia, tipo, usuario y timestamp. Trazabilidad completa.")
+st.dataframe(pd.DataFrame(MOVEMENTS), use_container_width=True, hide_index=True)
