@@ -139,6 +139,48 @@ if page == "📊 Dashboard":
               help="SKU with highest total units across all locations.")
 
     st.divider()
+    st.markdown("#### 📦 Aged Inventory 90d+")
+    st.caption("SKUs that have been in stock for 90+ days without movement. Target: <20–25% of total · Long-term goal: <15%.")
+
+    # Demo: flag SKUs with low movement as aged (in production this comes from Shopify product created_at / last sold)
+    AGED_SKUS = {
+        "HELM-GV-L":  {"desc": "Giro Vantage Helmet L",      "days": 112, "units": 4,  "location": "Central / Warehouse"},
+        "ACC-PUMP-F": {"desc": "Topeak Floor Pump",           "days": 98,  "units": 3,  "location": "Store 1 · Cycling"},
+        "ASS-GEL-P":  {"desc": "Gel Saddle Pro",              "days": 95,  "units": 2,  "location": "Store 2 · Running"},
+    }
+
+    all_units_total = sum(v["Central"]+v["Store1"]+v["Store2"] for v in INVENTORY.values())
+    aged_units_total = sum(v["units"] for v in AGED_SKUS.values())
+    aged_pct = aged_units_total / all_units_total * 100
+
+    ag1, ag2, ag3, ag4 = st.columns(4)
+    ag1.metric("📦 Aged SKUs",        len(AGED_SKUS),
+               help="Number of SKUs with 90+ days without movement.")
+    ag2.metric("📦 Aged Units",       aged_units_total,
+               help="Total units sitting 90+ days.")
+    aged_color = "🟢" if aged_pct < 20 else ("🟡" if aged_pct < 25 else "🔴")
+    ag3.metric(f"{aged_color} % of Total Stock", f"{aged_pct:.1f}%",
+               help="Target: <20–25%. Currently within acceptable range.")
+    ag4.metric("🎯 Contract Target",  "<20–25%",
+               help="Long-term goal: <15% of total stock.")
+
+    if aged_pct >= 25:
+        st.error(f"⚠️ Aged inventory at {aged_pct:.1f}% — above contract target. Review and action required.")
+    elif aged_pct >= 20:
+        st.warning(f"🟡 Aged inventory at {aged_pct:.1f}% — approaching contract threshold of 25%.")
+    else:
+        st.success(f"✅ Aged inventory at {aged_pct:.1f}% — within contract target (<20–25%).")
+
+    aged_rows = [
+        {"SKU": sku, "Description": d["desc"], "Days in Stock": d["days"],
+         "Units": d["units"], "Location": d["location"],
+         "Risk": "🔴 High" if d["days"] > 120 else "🟡 Medium"}
+        for sku, d in AGED_SKUS.items()
+    ]
+    st.dataframe(pd.DataFrame(aged_rows), use_container_width=True, hide_index=True)
+    st.caption("In production: calculated from Shopify product last sold date vs current date.")
+
+    st.divider()
     st.markdown("#### Stock Distribution by Location")
     all_u     = sum(v["Central"]+v["Store1"]+v["Store2"] for v in INVENTORY.values())
     central_u = sum(v["Central"] for v in INVENTORY.values())
@@ -162,9 +204,11 @@ if page == "📊 Dashboard":
         st.caption("Running specialty store. Floor inventory only.")
 
     st.divider()
+    st.divider()
+    st.markdown("#### ⚠️ Active Alerts & Inventory Snapshot")
     left, right = st.columns(2)
     with left:
-        st.markdown("#### ⚠️ Active Alerts")
+        st.markdown("**⚠️ Active Alerts**")
         alerted = False
         for sku, data in INVENTORY.items():
             total = data["Central"]+data["Store1"]+data["Store2"]
@@ -179,7 +223,7 @@ if page == "📊 Dashboard":
         st.info("📦 **Trek Bikes PO-2026-041** — ETA Apr 8 · 24 units incoming")
 
     with right:
-        st.markdown("#### 📦 Full Inventory — All Locations")
+        st.markdown("**📦 Full Inventory — All Locations**")
         rows = []
         for sku, data in INVENTORY.items():
             total = data["Central"]+data["Store1"]+data["Store2"]
