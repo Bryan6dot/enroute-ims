@@ -1,136 +1,183 @@
 import streamlit as st
 import pandas as pd
-import io, sys, os
+from datetime import datetime
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from utils.shopify_mock import shopify_preview
 
+st.set_page_config(page_title="Inventory Control · Enroute IMS", layout="wide")
 
+if not st.session_state.get("user_role"):
+    st.warning("⚠️ Inicia sesión desde la página principal.")
+    st.stop()
 
-INVENTORY = {
-    "TRK-FX3-L":  {"desc": "Trek FX3 Disc Large",        "Central": 12, "Store1": 2, "Store2": 0},
-    "TRK-FX3-M":  {"desc": "Trek FX3 Disc Medium",       "Central": 8,  "Store1": 3, "Store2": 1},
-    "TRK-FX3-S":  {"desc": "Trek FX3 Disc Small",        "Central": 5,  "Store1": 1, "Store2": 0},
-    "SHM-XT-M8":  {"desc": "Shimano XT M8100 Derailleur","Central": 2,  "Store1": 0, "Store2": 1},
-    "ASS-GEL-P":  {"desc": "Gel Saddle Pro",              "Central": 8,  "Store1": 3, "Store2": 2},
-    "HELM-GV-M":  {"desc": "Giro Vantage Helmet M",       "Central": 0,  "Store1": 4, "Store2": 1},
-    "HELM-GV-L":  {"desc": "Giro Vantage Helmet L",       "Central": 3,  "Store1": 1, "Store2": 0},
-    "RUN-NK-9":   {"desc": "Nike Pegasus 9",              "Central": 15, "Store1": 0, "Store2": 6},
-    "RUN-BK-GT":  {"desc": "Brooks Ghost 16",             "Central": 10, "Store1": 0, "Store2": 4},
-    "ACC-PUMP-F": {"desc": "Topeak Floor Pump",           "Central": 6,  "Store1": 2, "Store2": 1},
-}
+with st.sidebar:
+    st.markdown("### 🚲 Enroute IMS")
+    st.caption(f"**{st.session_state.user_name}** · {st.session_state.user_role}")
+    st.divider()
+    st.caption("Modo: **🧪 Pruebas** — Shopify en preview")
+    st.divider()
+    if st.button("Sign Out", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 
-MOVEMENTS = [
-    {"Fecha": "2026-04-05", "Referencia": "PO-2026-041", "Tipo": "entrada",  "Location": "Central",    "Units": "+18", "Usuario": "warehouse"},
-    {"Fecha": "2026-04-04", "Referencia": "TRF-021",     "Tipo": "traslado", "Location": "Central→S1", "Units": "±6",  "Usuario": "store1"},
-    {"Fecha": "2026-04-03", "Referencia": "ADJ-019",     "Tipo": "salida",   "Location": "Store 2",    "Units": "-3",  "Usuario": "store2"},
-    {"Fecha": "2026-04-02", "Referencia": "PO-2026-038", "Tipo": "entrada",  "Location": "Central",    "Units": "+42", "Usuario": "warehouse"},
-]
-
-VALID_SKUS = set(INVENTORY.keys())
-VALID_TIPOS = ["entrada", "salida", "traslado", "recepcion"]
-VALID_LOCS  = ["Central / Warehouse", "Store 1 · Cycling", "Store 2 · Running"]
+LOCATIONS = ["Central / Warehouse", "Store 1 · Cycling", "Store 2 · Running"]
+LOC_KEY   = {"Central / Warehouse": "Central", "Store 1 · Cycling": "Store1", "Store 2 · Running": "Store2"}
 
 st.title("📦 Inventory Control")
-st.caption("Entradas · Salidas · Traslados · Ajustes — todos los movimientos se aplican directamente en Shopify")
+st.caption("Existencias por location · Traspasos entre ubicaciones")
 st.divider()
 
-# ── Template download ─────────────────────────────────────────────────────────
-with st.expander("📥 Descargar template Excel", expanded=False):
-    st.caption("Usa este template para registrar cualquier tipo de movimiento. Un solo formato para todas las locations.")
-    tpl = pd.DataFrame([
-        ["TRK-FX3-L", "Trek FX3 Disc Large",  2, "entrada",  "Central / Warehouse",  "PO-2026-041"],
-        ["SHM-XT-M8", "Shimano XT M8100",      4, "traslado", "Central / Warehouse",  "TRF-021"],
-        ["ASS-GEL-P", "Gel Saddle Pro",         3, "salida",   "Store 2 · Running",    ""],
-    ], columns=["SKU", "Descripcion", "Cantidad", "Tipo", "Location", "Referencia"])
-    st.dataframe(tpl, use_container_width=True, hide_index=True)
-    buf = io.BytesIO()
-    tpl.to_excel(buf, index=False, engine="openpyxl")
-    st.download_button("⬇ Descargar template.xlsx", data=buf.getvalue(),
-                       file_name="enroute_template.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.caption("**Tipos válidos:** `entrada` · `salida` · `traslado` · `recepcion`")
+tab_stock, tab_transfer = st.tabs(["📊 Existencias actuales", "🔄 Traspaso entre locations"])
 
-st.divider()
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — EXISTENCIAS ACTUALES
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_stock:
+    inv = st.session_state.get("inventory", {})
 
-# ── Upload section ─────────────────────────────────────────────────────────────
-st.markdown("#### ↑ Subir Excel de movimientos")
-st.caption("La app valida cada fila antes de enviar a Shopify. Los errores se muestran en la previsualización.")
+    if not inv:
+        st.info("Sin datos de inventario. Las existencias se registran al recibir un PO en el módulo **PO Tracker**.")
+    else:
+        # Filters
+        col_f1, col_f2 = st.columns([1, 2])
+        with col_f1:
+            loc_filter = st.selectbox("Filtrar por location", ["Todas"] + LOCATIONS)
+        with col_f2:
+            search = st.text_input("Buscar SKU o descripción", placeholder="Ej. TREK o ERC-BIKE")
 
-uploaded = st.file_uploader("Selecciona el archivo Excel", type=["xlsx", "xls"])
+        rows = []
+        for sku, data in inv.items():
+            if search and search.upper() not in sku.upper() and search.lower() not in data.get("desc","").lower():
+                continue
+            total = data.get("Central",0)+data.get("Store1",0)+data.get("Store2",0)
+            row = {
+                "SKU":          sku,
+                "Descripción":  data.get("desc","—"),
+                "Central 🏭":  data.get("Central",0),
+                "Store 1 🚲":  data.get("Store1",0),
+                "Store 2 🏃":  data.get("Store2",0),
+                "Total":        total,
+                "Estado":       "🚫 Stockout" if total==0 else ("🔴 Low" if total<5 else ("🟡 Watch" if total<10 else "🟢 OK")),
+            }
+            if loc_filter != "Todas":
+                lk = LOC_KEY[loc_filter]
+                if data.get(lk,0) == 0:
+                    continue
+            rows.append(row)
 
-if uploaded:
-    try:
-        df = pd.read_excel(uploaded, engine="openpyxl")
-        statuses = []
-        for _, row in df.iterrows():
-            issues = []
-            if str(row.get("SKU","")) not in VALID_SKUS:
-                issues.append("SKU no existe en Shopify")
-            if str(row.get("Tipo","")).lower() not in VALID_TIPOS:
-                issues.append("Tipo inválido")
-            if str(row.get("Location","")) not in VALID_LOCS:
-                issues.append("Location inválida")
-            try:
-                if int(row.get("Cantidad", 0)) <= 0:
-                    issues.append("Cantidad debe ser > 0")
-            except Exception:
-                issues.append("Cantidad no numérica")
-            statuses.append("❌ " + " · ".join(issues) if issues else "✅ Válido")
-        df["Estado"] = statuses
-        valid = sum(1 for s in statuses if s.startswith("✅"))
-        errors = sum(1 for s in statuses if s.startswith("❌"))
+        if not rows:
+            st.warning("No hay artículos que coincidan con el filtro.")
+        else:
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Estado": st.column_config.TextColumn("Estado"),
+                },
+            )
+            st.caption(f"Mostrando {len(rows)} SKU(s) · {sum(r['Total'] for r in rows)} unidades totales")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("✅ Filas válidas", valid)
-        c2.metric("❌ Con error", errors, delta_color="inverse")
-        c3.metric("📤 Listas para Shopify", valid)
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — TRASPASO
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_transfer:
+    st.markdown("#### Traspaso entre locations")
+    st.caption("Mueve unidades de una ubicación a otra. Shopify recibe dos ajustes: resta en origen y suma en destino.")
 
-        st.markdown("**Previsualización — revisión antes de aplicar**")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    inv = st.session_state.get("inventory", {})
 
-        if valid > 0:
-            if st.button(f"🚀 Aplicar {valid} movimientos → Shopify", type="primary"):
-                st.success(f"✅ {valid} movimientos aplicados en Shopify correctamente. (Modo demo)")
-                st.info("ℹ️ En producción: cada fila llama a `POST /inventory_levels/adjust.json` en Shopify API.")
-    except Exception as e:
-        st.error(f"Error leyendo el archivo: {e}")
-else:
-    st.info("💡 Sube un Excel con el template para ver la previsualización y validación automática.")
+    if not inv:
+        st.info("Sin datos de inventario. Recibe al menos un PO para habilitar traspasos.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            origin = st.selectbox("📍 Location origen", LOCATIONS, key="trf_origin")
+        with col2:
+            dest_options = [l for l in LOCATIONS if l != origin]
+            destination  = st.selectbox("📍 Location destino", dest_options, key="trf_dest")
 
-st.divider()
+        st.markdown("#### Artículos a traspasar")
 
-# ── Live inventory table ──────────────────────────────────────────────────────
-st.markdown("#### 📊 Existencias actuales por location")
-st.caption("Datos leídos directamente desde Shopify Inventory API. Se refrescan en cada carga de página.")
+        origin_key = LOC_KEY[origin]
+        available_skus = {sku: data for sku, data in inv.items() if data.get(origin_key, 0) > 0}
 
-col_search, col_filter = st.columns([2, 1])
-with col_search:
-    search = st.text_input("🔍 Filtrar por SKU o descripción", placeholder="Ej: Trek · Shimano · RUN")
-with col_filter:
-    estado_filter = st.selectbox("Estado", ["Todos", "🔴 Bajo", "🟡 Watch", "🟢 OK"])
+        if not available_skus:
+            st.warning(f"No hay existencias en **{origin}** para traspasar.")
+        else:
+            trf_items = []
+            for sku, data in available_skus.items():
+                avail = data.get(origin_key, 0)
+                col_a, col_b, col_c, col_d = st.columns([2, 2, 1, 1])
+                with col_a:
+                    st.text(sku)
+                with col_b:
+                    st.text(data.get("desc","—"))
+                with col_c:
+                    st.caption(f"Disponible: {avail}")
+                with col_d:
+                    qty = st.number_input(
+                        "Qty",
+                        min_value=0,
+                        max_value=avail,
+                        value=0,
+                        key=f"trf_{sku}",
+                    )
+                if qty > 0:
+                    trf_items.append({"sku": sku, "desc": data.get("desc","—"), "qty": qty})
 
-rows = []
-for sku, data in INVENTORY.items():
-    total = data["Central"] + data["Store1"] + data["Store2"]
-    estado = "🔴 Bajo" if total < 5 else ("🟡 Watch" if total < 10 else "🟢 OK")
-    if search and search.upper() not in sku.upper() and search.lower() not in data["desc"].lower():
-        continue
-    if estado_filter != "Todos" and estado != estado_filter:
-        continue
-    rows.append({
-        "SKU": sku, "Descripción": data["desc"],
-        "Central 🏭": data["Central"], "Store1 🚲": data["Store1"], "Store2 🏃": data["Store2"],
-        "Total": total, "Estado": estado,
-    })
+            st.divider()
+            notes_trf = st.text_area("Notas del traspaso (opcional)", key="trf_notes")
 
-if rows:
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.caption(f"Mostrando {len(rows)} de {len(INVENTORY)} SKUs activos")
-else:
-    st.info("No se encontraron SKUs con ese filtro.")
+            if st.button("📡 Ejecutar traspaso y enviar a Shopify", type="primary"):
+                if not trf_items:
+                    st.error("Selecciona al menos un artículo con cantidad mayor a 0.")
+                else:
+                    dest_key = LOC_KEY[destination]
+                    for item in trf_items:
+                        st.session_state.inventory[item["sku"]][origin_key] -= item["qty"]
+                        st.session_state.inventory[item["sku"]][dest_key]   += item["qty"]
+                        st.session_state.transfers.append({
+                            "Fecha":       datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "SKU":         item["sku"],
+                            "Descripción": item["desc"],
+                            "Qty":         item["qty"],
+                            "Origen":      origin,
+                            "Destino":     destination,
+                            "Notas":       notes_trf,
+                        })
 
-st.divider()
+                    st.success(f"✅ Traspaso registrado — {len(trf_items)} SKU(s) movidos de {origin} a {destination}.")
+                    st.markdown("---")
+                    st.markdown("### 📡 Llamadas al API de Shopify")
+                    st.caption(f"En producción se ejecutarían **{len(trf_items) * 2} llamadas** (–origen / +destino por cada SKU):")
 
-# ── Movement history ──────────────────────────────────────────────────────────
-st.markdown("#### 📋 Historial de movimientos")
-st.caption("Cada movimiento queda registrado con referencia, tipo, usuario y timestamp. Trazabilidad completa.")
-st.dataframe(pd.DataFrame(MOVEMENTS), use_container_width=True, hide_index=True)
+                    for item in trf_items:
+                        shopify_preview(
+                            endpoint="/admin/api/2026-01/inventory_levels/adjust.json",
+                            method="POST",
+                            payload={
+                                "inventory_level": {
+                                    "inventory_item_id":    f"← GET /variants.json?sku={item['sku']}",
+                                    "location_id":          f"← GET /locations.json → {origin}",
+                                    "available_adjustment": -item["qty"],
+                                    "reason":               "movement_created",
+                                }
+                            },
+                            description=f"**RESTA {item['qty']} uds.** de `{item['sku']}` en {origin}",
+                        )
+                        shopify_preview(
+                            endpoint="/admin/api/2026-01/inventory_levels/adjust.json",
+                            method="POST",
+                            payload={
+                                "inventory_level": {
+                                    "inventory_item_id":    f"← GET /variants.json?sku={item['sku']}",
+                                    "location_id":          f"← GET /locations.json → {destination}",
+                                    "available_adjustment": +item["qty"],
+                                    "reason":               "movement_received",
+                                }
+                            },
+                            description=f"**SUMA {item['qty']} uds.** de `{item['sku']}` en {destination}",
+                        )
