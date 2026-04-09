@@ -1,247 +1,258 @@
 import streamlit as st
 import pandas as pd
-import io, sys, os
+import uuid
+from datetime import date, datetime
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from utils.shopify_mock import shopify_preview
 
+st.set_page_config(page_title="PO Tracker · Enroute IMS", layout="wide")
 
+if not st.session_state.get("user_role"):
+    st.warning("⚠️ Inicia sesión desde la página principal.")
+    st.stop()
 
-DEMO_POS = [
-    {
-        "id": "PO-2026-041", "brand": "Trek Bikes", "supplier": "QBP Distributor",
-        "items": 4, "units": 24, "eta": "2026-04-08",
-        "status": "En tránsito", "location": "Central / Warehouse",
-        "created_by": "purchasing", "created_at": "2026-04-01",
-        "skus": [
-            {"SKU": "TRK-FX3-L", "Descripción": "Trek FX3 Disc Large",  "Ordenado": 4,  "Recibido": 4},
-            {"SKU": "TRK-FX3-M", "Descripción": "Trek FX3 Disc Medium", "Ordenado": 6,  "Recibido": 6},
-            {"SKU": "TRK-FX3-S", "Descripción": "Trek FX3 Disc Small",  "Ordenado": 4,  "Recibido": 0},
-            {"SKU": "TRK-ACC-BL","Descripción": "Trek Accessory Bundle","Ordenado": 10, "Recibido": 0},
-        ],
-    },
-    {
-        "id": "PO-2026-039", "brand": "Shimano", "supplier": "Shimano Direct",
-        "items": 2, "units": 60, "eta": "2026-04-12",
-        "status": "Parcialmente recibido", "location": "Central / Warehouse",
-        "created_by": "purchasing", "created_at": "2026-03-28",
-        "skus": [
-            {"SKU": "SHM-XT-M8",  "Descripción": "Shimano XT M8100 Derailleur", "Ordenado": 20, "Recibido": 10},
-            {"SKU": "SHM-CS-M8",  "Descripción": "Shimano CS-M8100 Cassette",   "Ordenado": 40, "Recibido": 0},
-        ],
-    },
-    {
-        "id": "PO-2026-037", "brand": "Garmin", "supplier": "CDN Cycling Supply",
-        "items": 3, "units": 15, "eta": "2026-04-18",
-        "status": "En tránsito", "location": "Central / Warehouse",
-        "created_by": "purchasing", "created_at": "2026-03-25",
-        "skus": [
-            {"SKU": "GAR-530",  "Descripción": "Garmin Edge 530",  "Ordenado": 5,  "Recibido": 0},
-            {"SKU": "GAR-1040", "Descripción": "Garmin Edge 1040", "Ordenado": 5,  "Recibido": 0},
-            {"SKU": "GAR-HRM",  "Descripción": "Garmin HRM-Dual",  "Ordenado": 5,  "Recibido": 0},
-        ],
-    },
-    {
-        "id": "PO-2026-034", "brand": "Giro Helmets", "supplier": "Sport Systems",
-        "items": 2, "units": 18, "eta": "2026-04-01",
-        "status": "Recibido", "location": "Central / Warehouse",
-        "created_by": "purchasing", "created_at": "2026-03-20",
-        "skus": [
-            {"SKU": "HELM-GV-M", "Descripción": "Giro Vantage Helmet M", "Ordenado": 9, "Recibido": 9},
-            {"SKU": "HELM-GV-L", "Descripción": "Giro Vantage Helmet L", "Ordenado": 9, "Recibido": 9},
-        ],
-    },
-]
+with st.sidebar:
+    st.markdown("### 🚲 Enroute IMS")
+    st.caption(f"**{st.session_state.user_name}** · {st.session_state.user_role}")
+    st.divider()
+    st.caption("Modo: **🧪 Pruebas** — Shopify en preview")
+    st.divider()
+    if st.button("Sign Out", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 
-STATUS_ICON = {
-    "En tránsito": "🔵",
-    "Parcialmente recibido": "🟡",
-    "Recibido": "🟢",
-    "Con discrepancia": "🔴",
-}
-
-STAGES = ["PO creada", "Confirmada", "En tránsito", "Recepción", "Shopify ✓"]
-STAGE_IDX = {"En tránsito": 2, "Parcialmente recibido": 3, "Recibido": 4}
+LOCATIONS = ["Central / Warehouse", "Store 1 · Cycling", "Store 2 · Running"]
+LOC_KEY   = {"Central / Warehouse": "Central", "Store 1 · Cycling": "Store1", "Store 2 · Running": "Store2"}
 
 st.title("📋 PO Tracker")
-st.caption("Purchase Orders · Recepción de mercancía · Validación contra packing slip · Actualización automática en Shopify")
+st.caption("Gestión de órdenes de compra — Crear · Seguimiento · Recepción")
 st.divider()
 
-# ── Summary KPIs ──────────────────────────────────────────────────────────────
-transit  = sum(1 for p in DEMO_POS if p["status"] == "En tránsito")
-partial  = sum(1 for p in DEMO_POS if p["status"] == "Parcialmente recibido")
-received = sum(1 for p in DEMO_POS if p["status"] == "Recibido")
-
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("🔵 En tránsito",           transit,  help="POs confirmadas esperando llegada al warehouse.")
-k2.metric("🟡 Parcialmente recibidas", partial,  help="POs con recepción incompleta. Quedan items pendientes.")
-k3.metric("🟢 Recibidas completo",    received, help="POs totalmente recibidas y aplicadas en Shopify.")
-k4.metric("📦 Total unidades en POs", sum(p["units"] for p in DEMO_POS), help="Suma de unidades en todas las POs activas.")
-
-st.divider()
-
-tab_list, tab_new = st.tabs(["📋 POs Activas", "➕ Nueva PO"])
+tab_create, tab_transit, tab_receive = st.tabs(["➕ Crear PO", "🔵 En tránsito", "📥 Recibir mercancía"])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — LIST
+# TAB 1 — CREAR PO
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_list:
-    search = st.text_input("🔍 Buscar por marca, proveedor o # PO",
-                           placeholder="Ej: Trek · Shimano · PO-2026-041")
-    status_f = st.selectbox("Filtrar por estado",
-                             ["Todos", "En tránsito", "Parcialmente recibido", "Recibido"])
+with tab_create:
+    st.markdown("#### Nueva Orden de Compra")
+    st.caption("Completa los datos del pedido. Los artículos entrarán al inventario cuando se confirme la recepción.")
 
-    filtered = [
-        p for p in DEMO_POS
-        if (not search or search.lower() in p["brand"].lower()
-                       or search.lower() in p["id"].lower()
-                       or search.lower() in p["supplier"].lower())
-        and (status_f == "Todos" or p["status"] == status_f)
-    ]
+    col_a, col_b = st.columns(2)
+    with col_a:
+        supplier  = st.text_input("Proveedor *", placeholder="Ej. Trek Bikes México")
+        reference = st.text_input("# Referencia proveedor", placeholder="Ej. INV-2025-8841")
+    with col_b:
+        eta       = st.date_input("ETA (fecha estimada de llegada) *", min_value=date.today())
+        dest_loc  = st.selectbox("Location de destino *", LOCATIONS)
 
-    if not filtered:
-        st.info("No se encontraron POs con ese criterio.")
-    else:
-        for po in filtered:
-            icon = STATUS_ICON.get(po["status"], "⚪")
-            with st.expander(
-                f"{icon} **{po['id']}** — {po['brand']}  ·  {po['supplier']}  |  ETA: {po['eta']}  |  {po['status']}",
-                expanded=(po["status"] != "Recibido"),
-            ):
-                # Meta row
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Proveedor",      po["supplier"])
-                m2.metric("ETA",            po["eta"])
-                m3.metric("Unidades",       po["units"])
-                m4.metric("Status",         po["status"])
+    st.markdown("#### Artículos del pedido")
+    st.caption("Agrega cada artículo con su SKU, descripción y cantidad ordenada.")
 
-                # Timeline
-                st.markdown("**Progreso de la PO**")
-                current = STAGE_IDX.get(po["status"], 2)
-                cols_tl = st.columns(len(STAGES))
-                for i, (col, stage) in enumerate(zip(cols_tl, STAGES)):
-                    with col:
-                        if i < current:
-                            st.markdown(f"🟢 **{stage}**")
-                        elif i == current:
-                            st.markdown(f"🟡 **{stage}**")
-                        else:
-                            st.markdown(f"⚪ {stage}")
+    if "po_items" not in st.session_state:
+        st.session_state.po_items = [{"SKU": "", "Descripción": "", "Qty Ordenada": 1}]
 
-                st.divider()
-
-                # SKU table
-                if po["skus"]:
-                    df_sku = pd.DataFrame(po["skus"])
-                    df_sku["Diferencia"] = df_sku["Recibido"] - df_sku["Ordenado"]
-                    df_sku["Estado"] = df_sku["Diferencia"].apply(
-                        lambda d: "✅ Completo" if d == 0 else ("⏳ Pendiente" if d < 0 else "⚠️ Exceso")
-                    )
-                    st.markdown("**Items de la PO**")
-                    st.dataframe(df_sku, use_container_width=True, hide_index=True)
-
-                    # Download PO
-                    buf = io.BytesIO()
-                    df_sku.to_excel(buf, index=False, engine="openpyxl")
-                    st.download_button(
-                        f"⬇ Descargar {po['id']}.xlsx",
-                        data=buf.getvalue(),
-                        file_name=f"{po['id']}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"dl_{po['id']}",
-                    )
-
-                # Reception form — warehouse / admin only
-                if st.session_state.user_role in ["warehouse", "admin"]:
-                    if po["status"] in ["En tránsito", "Parcialmente recibido"]:
-                        st.divider()
-                        st.markdown("**📥 Registrar recepción**")
-                        st.caption("Valida la mercancía recibida contra el packing slip. Shopify se actualiza al confirmar.")
-
-                        method = st.radio(
-                            "Método de validación",
-                            ["✅ Checklist manual (marcar items recibidos)",
-                             "📄 Subir Excel de recepción"],
-                            horizontal=True,
-                            key=f"method_{po['id']}",
-                        )
-
-                        if method.startswith("✅"):
-                            received_items = {}
-                            for item in po["skus"]:
-                                if item["Recibido"] < item["Ordenado"]:
-                                    checked = st.checkbox(
-                                        f"**{item['SKU']}** — {item['Descripción']}  "
-                                        f"(Ordenado: {item['Ordenado']}  |  "
-                                        f"Pendiente: {item['Ordenado'] - item['Recibido']})",
-                                        key=f"chk_{po['id']}_{item['SKU']}",
-                                    )
-                                    if checked:
-                                        received_items[item["SKU"]] = item["Ordenado"] - item["Recibido"]
-                            if received_items:
-                                total_units = sum(received_items.values())
-                                if st.button(
-                                    f"🚀 Confirmar recepción de {len(received_items)} SKUs ({total_units} units) → Shopify",
-                                    key=f"confirm_{po['id']}",
-                                    type="primary",
-                                ):
-                                    st.success(f"✅ Recepción confirmada. {total_units} unidades actualizadas en Shopify. (Modo demo)")
-                        else:
-                            recv_file = st.file_uploader(
-                                "Excel de recepción (mismo template universal)",
-                                type=["xlsx", "xls"],
-                                key=f"recv_{po['id']}",
-                            )
-                            if recv_file:
-                                df_r = pd.read_excel(recv_file, engine="openpyxl")
-                                st.dataframe(df_r, use_container_width=True, hide_index=True)
-                                if st.button(
-                                    "🚀 Confirmar recepción → Shopify",
-                                    key=f"confirm_xl_{po['id']}",
-                                    type="primary",
-                                ):
-                                    st.success("✅ Recepción confirmada. Shopify actualizado. (Modo demo)")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — NEW PO
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_new:
-    if st.session_state.user_role not in ["purchasing", "admin"]:
-        st.warning("⚠️ Solo el equipo de compras puede crear nuevas POs.")
-        st.stop()
-
-    st.markdown("#### Crear nueva Purchase Order")
-    st.caption("La PO quedará visible para el equipo de warehouse con el ETA asignado.")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        brand    = st.text_input("Marca / Proveedor *",  placeholder="Ej: Trek Bikes")
-        supplier = st.text_input("Distribuidor",          placeholder="Ej: QBP Distributor")
-        location = st.selectbox("Location destino *",
-                                ["Central / Warehouse", "Store 1 · Cycling", "Store 2 · Running"])
-    with c2:
-        eta      = st.date_input("ETA esperado *")
-        notes    = st.text_area("Notas para warehouse", height=100,
-                                placeholder="Instrucciones especiales, condiciones de entrega, etc.")
-
-    st.markdown("**Archivo de la PO**")
-    st.caption("Adjunta el PDF o Excel de la orden del proveedor. Warehouse lo descargará para validar contra el packing slip.")
-    po_file = st.file_uploader("Sube el archivo de la PO", type=["pdf", "xlsx", "xls"], key="new_po")
-
-    if po_file:
-        st.success(f"📎 Archivo adjunto: `{po_file.name}` — {po_file.size:,} bytes")
+    items_df = pd.DataFrame(st.session_state.po_items)
+    edited = st.data_editor(
+        items_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "SKU":          st.column_config.TextColumn("SKU *", help="Código único del artículo"),
+            "Descripción":  st.column_config.TextColumn("Descripción *"),
+            "Qty Ordenada": st.column_config.NumberColumn("Qty Ordenada *", min_value=1, step=1),
+        },
+        hide_index=True,
+    )
+    st.session_state.po_items = edited.to_dict("records")
 
     st.divider()
-    if st.button("📤 Publicar PO", type="primary"):
-        if not brand:
-            st.error("El campo Marca / Proveedor es obligatorio.")
-        elif not po_file:
-            st.error("Adjunta el archivo de la PO antes de publicar.")
+    if st.button("✅ Registrar PO", type="primary", use_container_width=False):
+        valid_items = [r for r in st.session_state.po_items if r.get("SKU") and r.get("Descripción")]
+        if not supplier:
+            st.error("El campo Proveedor es obligatorio.")
+        elif not valid_items:
+            st.error("Agrega al menos un artículo con SKU y Descripción.")
         else:
-            new_id = f"PO-2026-{len(DEMO_POS) + 42:03d}"
-            st.success(f"""
-            ✅ **{new_id}** publicada correctamente.
+            po_id = f"PO-{date.today().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
+            total = sum(r.get("Qty Ordenada", 0) for r in valid_items)
+            po = {
+                "id":          po_id,
+                "supplier":    supplier,
+                "reference":   reference,
+                "eta":         str(eta),
+                "destination": dest_loc,
+                "status":      "En tránsito",
+                "created_at":  datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "total_units": total,
+                "skus": [
+                    {
+                        "SKU":          r["SKU"].strip().upper(),
+                        "Descripción":  r["Descripción"],
+                        "Qty Ordenada": r.get("Qty Ordenada", 0),
+                        "Qty Recibida": 0,
+                    }
+                    for r in valid_items
+                ],
+            }
+            st.session_state.pos.append(po)
+            st.session_state.po_items = [{"SKU": "", "Descripción": "", "Qty Ordenada": 1}]
+            st.success(f"✅ PO **{po_id}** registrado correctamente. Visible en la pestaña 'En tránsito'.")
+            st.rerun()
 
-            - Marca: **{brand}**  |  Distribuidor: **{supplier or '—'}**
-            - ETA: **{eta}**  |  Destino: **{location}**
-            - Estado inicial: **En tránsito**
-            - Warehouse ha sido notificado automáticamente.
-            """)
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — EN TRÁNSITO
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_transit:
+    st.markdown("#### Órdenes en tránsito")
+    pos = st.session_state.get("pos", [])
+
+    if not pos:
+        st.info("No hay POs registrados. Crea uno en la pestaña 'Crear PO'.")
+    else:
+        STATUS_COLOR = {
+            "En tránsito": "🔵",
+            "Parcial":     "🟡",
+            "Recibido":    "🟢",
+            "Discrepancia":"🔴",
+        }
+        for po in pos:
+            icon = STATUS_COLOR.get(po["status"], "⚪")
+            with st.expander(f"{icon} **{po['id']}** — {po['supplier']} · ETA: {po['eta']} · {po['total_units']} uds. · {po['status']}"):
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Proveedor", po["supplier"])
+                col2.metric("ETA",       po["eta"])
+                col3.metric("Destino",   po["destination"])
+                col4.metric("Estado",    po["status"])
+                if po.get("reference"):
+                    st.caption(f"Ref. proveedor: {po['reference']}")
+                st.dataframe(
+                    pd.DataFrame(po["skus"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — RECIBIR MERCANCÍA
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_receive:
+    st.markdown("#### Recepción de mercancía")
+
+    pos_open = [p for p in st.session_state.get("pos", []) if p["status"] in ("En tránsito", "Parcial")]
+
+    if not pos_open:
+        st.info("No hay POs pendientes de recepción. Todos los POs activos están recibidos o aún no se han creado.")
+    else:
+        po_ids = [p["id"] for p in pos_open]
+        selected_id = st.selectbox("Selecciona el PO a recibir", po_ids)
+        po = next(p for p in pos_open if p["id"] == selected_id)
+
+        st.markdown(f"**Proveedor:** {po['supplier']}  |  **ETA:** {po['eta']}  |  **Destino:** {po['destination']}")
+        st.divider()
+
+        # Packing slip option
+        has_slip = st.radio(
+            "¿El paquete llegó con packing slip?",
+            ["✅ Sí, tengo packing slip", "❌ No, sin packing slip"],
+            horizontal=True,
+        )
+
+        if "❌" in has_slip:
+            st.warning("Sin packing slip. Exporta la lista de artículos esperados para revisar el paquete.")
+            expected_df = pd.DataFrame([
+                {"SKU": s["SKU"], "Descripción": s["Descripción"], "Qty Esperada": s["Qty Ordenada"], "Qty Recibida": ""}
+                for s in po["skus"]
+            ])
+            csv = expected_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Exportar CSV para revisión",
+                data=csv,
+                file_name=f"{po['id']}_revision.csv",
+                mime="text/csv",
+            )
+            st.info("Después de revisar el paquete con el CSV, selecciona 'Sí, tengo packing slip' para continuar con la recepción.")
+        else:
+            st.markdown("#### Captura las cantidades recibidas")
+            st.caption("Ingresa las unidades físicamente contadas. Si hay discrepancia, el sistema la registrará.")
+
+            received_inputs = {}
+            for sku_data in po["skus"]:
+                sku = sku_data["SKU"]
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col1:
+                    st.text(f"{sku} — {sku_data['Descripción']}")
+                with col2:
+                    st.text(f"Ordenado: {sku_data['Qty Ordenada']}")
+                with col3:
+                    received_inputs[sku] = st.number_input(
+                        "Recibido",
+                        min_value=0,
+                        max_value=int(sku_data["Qty Ordenada"]) * 2,
+                        value=int(sku_data.get("Qty Recibida", 0)),
+                        key=f"recv_{po['id']}_{sku}",
+                    )
+
+            st.divider()
+            notes = st.text_area("Notas de recepción (opcional)", placeholder="Ej. Caja dañada en SKU X, faltante justificado, etc.")
+
+            if st.button("📡 Confirmar recepción y enviar a Shopify", type="primary"):
+                adjustments = []
+                new_status  = "Recibido"
+                loc_key     = LOC_KEY.get(po["destination"], "Central")
+
+                for sku_data in po["skus"]:
+                    sku = sku_data["SKU"]
+                    qty_ord = int(sku_data["Qty Ordenada"])
+                    qty_rec = int(received_inputs.get(sku, 0))
+                    diff    = qty_rec - qty_ord
+
+                    # Update session inventory
+                    if sku not in st.session_state.inventory:
+                        st.session_state.inventory[sku] = {
+                            "desc":    sku_data["Descripción"],
+                            "Central": 0, "Store1": 0, "Store2": 0,
+                        }
+                    st.session_state.inventory[sku][loc_key] += qty_rec
+                    st.session_state.inventory[sku]["desc"]   = sku_data["Descripción"]
+
+                    adjustments.append({
+                        "sku":                   sku,
+                        "inventory_item_id":      f"← resolver via GET /variants.json?sku={sku}",
+                        "location_id":            f"← GET /locations.json → {po['destination']}",
+                        "available_adjustment":   qty_rec,
+                        "reason":                 "received",
+                    })
+
+                    if qty_rec < qty_ord:
+                        new_status = "Parcial" if new_status != "Discrepancia" else "Discrepancia"
+                    elif qty_rec != qty_ord:
+                        new_status = "Discrepancia"
+
+                # Update PO
+                for p in st.session_state.pos:
+                    if p["id"] == po["id"]:
+                        p["status"] = new_status
+                        for s in p["skus"]:
+                            s["Qty Recibida"] = received_inputs.get(s["SKU"], 0)
+
+                # Show Shopify preview for each SKU
+                st.success(f"✅ Recepción registrada en sistema. Estado PO: **{new_status}**")
+                st.markdown("---")
+                st.markdown("### 📡 Llamadas al API de Shopify")
+                st.caption(f"En producción se ejecutarían {len(adjustments)} llamada(s) a Shopify:")
+
+                for adj in adjustments:
+                    shopify_preview(
+                        endpoint=f"/admin/api/2026-01/inventory_levels/adjust.json",
+                        method="POST",
+                        payload={
+                            "inventory_level": {
+                                "inventory_item_id":    adj["inventory_item_id"],
+                                "location_id":          adj["location_id"],
+                                "available_adjustment": adj["available_adjustment"],
+                                "reason":               adj["reason"],
+                            }
+                        },
+                        description=f"Suma **{adj['available_adjustment']} unidades** de `{adj['sku']}` en {po['destination']}",
+                    )
