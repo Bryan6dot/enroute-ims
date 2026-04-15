@@ -40,11 +40,12 @@ SHOPIFY_LOCATIONS = ["In Store", "Online", "SLG", "Enroute Richmond", "SLG Hong 
 # SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
 _defaults = {
-    "page":     "📊 Dashboard",
-    "pos":      [],
-    "po_items": [{"SKU": "", "Description": "", "Qty": 1}],
-    "inv_df":   None,
-    "ord_df":   None,
+    "page":         "📊 Dashboard",
+    "pos":          [],
+    "po_items":     [{"SKU": "", "Description": "", "Qty": 1}],
+    "inv_df":       None,
+    "ord_df":       None,
+    "po_published": None,   # stores last published PO id for confirmation banner
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -835,6 +836,18 @@ elif page == "📋 PO Tracker":
         st.divider()
 
         # ── PUBLISH ────────────────────────────────────────────────────
+        # Show confirmation banner if a PO was just published
+        if st.session_state.get("po_published"):
+            pub = st.session_state.po_published
+            st.success(
+                f"✅ PO already added — **{pub['id']}** · {pub['brand']} · "
+                f"{pub['lines']} items · visible in Inventory Control → Receive PO."
+            )
+            if st.button("➕ Create another PO"):
+                st.session_state.po_published = None
+                st.rerun()
+            st.stop()
+
         valid_lines = [i for i in items if i["SKU"].strip()]
         if valid_lines:
             st.markdown(f"**Preview — {len(valid_lines)} line items ready to publish:**")
@@ -866,12 +879,10 @@ elif page == "📋 PO Tracker":
                         for i in valid_lines
                     ],
                 })
-                st.session_state.po_items = [{"SKU":"","Description":"","Qty":1}]
+                # Store confirmation info, clear form
+                st.session_state.po_published    = {"id": new_id, "brand": brand, "lines": len(valid_lines)}
+                st.session_state.po_items        = [{"SKU":"","Description":"","Qty":1}]
                 st.session_state.pop("invoice_extracted", None)
-                st.success(
-                    f"✅ **{new_id}** published — {len(valid_lines)} items · "
-                    f"visible in Inventory Control → Receive PO."
-                )
                 st.rerun()
 
     # ── TAB 2: ALL POs ────────────────────────────────────────────────────
