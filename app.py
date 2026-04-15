@@ -269,21 +269,26 @@ if page == "📊 Dashboard":
             delta_color="inverse" if summary["unfulfilled"] else "off")
         kpi(c4, "🔀 Partial", f"{summary['partial']:,}")
 
-        # In-transit coverage — compute here so it shows in the summary row too
+        # In-transit coverage banner — compute here so it shows in summary row
         _pos_transit = [p for p in st.session_state.pos if p.get("status") == "In Transit"]
-        _transit_skus = {
-            s["sku"].strip().upper()
-            for p in _pos_transit for s in p.get("skus", [])
-        }
-        if _transit_skus and inv_df is not None:
+        _transit_qty = {}
+        for _p in _pos_transit:
+            for _s in _p.get("skus", []):
+                _k = _s["sku"].strip().upper()
+                _transit_qty[_k] = _transit_qty.get(_k, 0) + int(_s.get("qty", 0))
+
+        if _transit_qty and inv_df is not None:
             _fulf_preview = check_fulfillability(ord_df, inv_df)
             _cant         = _fulf_preview[~_fulf_preview["Can_Fulfill"]].copy()
             _cant["_up"]  = _cant["SKU"].astype(str).str.strip().str.upper()
-            _n_covered    = int(_cant["_up"].isin(_transit_skus).sum())
+            # Covered = transit qty >= gap needed
+            _n_covered = int(_cant.apply(
+                lambda r: _transit_qty.get(r["_up"], 0) >= r["Gap"], axis=1
+            ).sum())
             if _n_covered:
                 st.info(
                     f"🚚 **{_n_covered} open order line(s)** cannot be filled today "
-                    f"but have SKUs arriving in an **In Transit PO**. "
+                    f"but have sufficient SKU quantity arriving in an **In Transit PO**. "
                     f"See details in *Can We Fulfill Open Orders?* below."
                 )
 
@@ -308,17 +313,31 @@ if page == "📊 Dashboard":
             cannot      = total_lines - can
             pct_can     = round(can / total_lines * 100, 1) if total_lines else 0
 
-            # In-transit coverage: unfulfillable lines whose SKU is in an In Transit PO
+            # In-transit coverage: unfulfillable lines whose SKU has ENOUGH qty in transit POs
+            # Build SKU → total units in transit (sum across all In Transit POs)
             pos_in_transit = [p for p in st.session_state.pos if p.get("status") == "In Transit"]
-            transit_skus   = {
-                s["sku"].strip().upper()
-                for p in pos_in_transit
-                for s in p.get("skus", [])
-            }
+            transit_qty = {}   # SKU (upper) → total ordered units in transit
+            for p in pos_in_transit:
+                for s in p.get("skus", []):
+                    key = s["sku"].strip().upper()
+                    transit_qty[key] = transit_qty.get(key, 0) + int(s.get("qty", 0))
+
             cant_df = fulf[~fulf["Can_Fulfill"]].copy()
             cant_df["_sku_up"] = cant_df["SKU"].astype(str).str.strip().str.upper()
-            covered_by_transit = cant_df[cant_df["_sku_up"].isin(transit_skus)]
-            n_covered = len(covered_by_transit)
+
+            def _transit_status(row):
+                in_t = transit_qty.get(row["_sku_up"], 0)
+                if in_t == 0:
+                    return "—", False
+                elif in_t >= row["Gap"]:
+                    return f"🚚 Yes ({in_t} units)", True
+                else:
+                    return f"⚠️ Partial ({in_t}/{row['Gap']} units)", False
+
+            cant_df[["Transit_Status","_covered"]] = cant_df.apply(
+                lambda r: pd.Series(_transit_status(r)), axis=1
+            )
+            n_covered = int(cant_df["_covered"].sum())
 
             c1, c2, c3, c4, c5 = st.columns(5)
             kpi(c1, "Open Lines",          f"{total_lines:,}")
@@ -337,12 +356,10 @@ if page == "📊 Dashboard":
             if not cant_df.empty:
                 with st.expander(f"❌ {len(cant_df)} lines that cannot be fulfilled with current stock"):
                     show = cant_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
-                                    "Available_Stock","Gap","Financial_Status"]].copy()
-                    show["In Transit PO?"] = cant_df["_sku_up"].apply(
-                        lambda s: "🚚 Yes" if s in transit_skus else "—"
-                    )
-                    st.dataframe(show.drop(columns=["_sku_up"] if "_sku_up" in show.columns else []),
-                                 use_container_width=True, hide_index=True)
+                                    "Available_Stock","Gap","Financial_Status","Transit_Status"]].copy()
+                    show.columns = ["Order ID","SKU","Item","Qty Ordered",
+                                    "In Stock","Gap","Financial Status","In Transit PO"]
+                    st.dataframe(show, use_container_width=True, hide_index=True)
 
             can_df = fulf[fulf["Can_Fulfill"]].sort_values("Order_ID")
             if not can_df.empty:
