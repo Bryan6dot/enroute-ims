@@ -571,52 +571,134 @@ elif page == "📋 PO Tracker":
 
     def extract_from_pdf(file_bytes):
         """
-        Local PDF extraction using pdfplumber only.
-        Strategy:
-          1. Try to find structured tables on each page → parse columns by header keywords.
-          2. If no table found, fall back to raw text lines → look for SKU-like patterns.
-        Returns: {"brand","po_number","ship_via","items":[{SKU,Description,Qty}]}
+        Local PDF extraction using pdfplumber — no external APIs.
+
+        Strategy (two-pass):
+          1. Structured tables: if pdfplumber finds data-populated tables, parse them
+             using column-header keyword matching.
+          2. Text-line pass: for invoices where the table renders as free text (common
+             in multi-column PDF layouts like ASSOS), detect item lines by:
+               a. Line starts with an article code (must contain a dot to filter noise).
+               b. Line contains a quantity + unit keyword (Pcs / EA / Units / each).
+
+        Meta extraction:
+          - Brand  : right-hand side of "Banking Info:" header line.
+          - Invoice : pattern INV/XX/0000 or first alphanumeric document-number block.
+          - Cust PO : "Customer PO No." field.
+          - Ship Via: scan lines after "Ship Via:" for known carrier keywords.
+
+        Returns: {"brand", "po_number", "ship_via", "items": [{SKU, Description, Qty}]}
         """
         import pdfplumber, io, re
 
-        items  = []
+        # Article code: starts alphanumeric, must contain at least one dot
+        # (rules out plain words like "Series", "Total", etc.)
+        ARTICLE_START = re.compile(r'^([A-Z0-9][A-Z0-9\.\-_]{5,30})\s+', re.I)
+        HAS_DOT       = re.compile(r'\.')
+        QTY_UNIT      = re.compile(r'\b(\d+)\s+(?:Pcs|EA|Units?|Each)\b', re.I)
+
+        # Footer lines that signal end of item section
+        FOOTER_RE = re.compile(
+            r'^(Net Total|Discount|Shipping|GST|PST|Total\b|Whs Policy|Thank you)',
+            re.I
+        )
+        # Known table column headers that mark start of item section
+        ITEM_HEADER_RE = re.compile(
+            r'(Article|SKU|Item|Ref)\s+(Colour|Color|Description|Desc)',
+            re.I
+        )
+
+        # Meta patterns
+        BRAND_RE   = re.compile(r'Banking Info:\s*(.+)',          re.I)
+        INV_RE     = re.compile(r'\b(INV/[A-Z]+/\d+)\b',         re.I)
+        CUST_PO_RE = re.compile(r'Customer PO No[.\s:]+([A-Za-z0-9_\-]+)', re.I)
+        CARRIERS   = ["UPS","DHL","FedEx","Fedex","Canada Post","Purolator","USPS","TNT","Canpar"]
+
         full_text = ""
+        items_text = []   # items found via text pass
+        items_table = []  # items found via table pass
 
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
-                full_text += (page.extract_text() or "") + "\n"
-                tables = page.extract_tables()
+                txt   = page.extract_text() or ""
+                full_text += txt + "\n"
+                lines = txt.splitlines()
 
-                if tables:
-                    for table in tables:
-                        items.extend(_parse_table(table))
-                else:
-                    # Text fallback: look for lines with a code-like token + qty
-                    lines = (page.extract_text() or "").splitlines()
-                    for line in lines:
-                        # Pattern: starts with alphanumeric code, ends with a number
-                        m = re.match(
-                            r'^([A-Z0-9][A-Z0-9\-_/\.]{2,24})\s{2,}(.+?)\s{2,}(\d+)\s*$',
-                            line.strip(), re.I
-                        )
-                        if m:
-                            items.append({
-                                "SKU":         m.group(1).strip(),
-                                "Description": m.group(2).strip(),
-                                "Qty":         _clean_qty(m.group(3)),
-                            })
+                # ── Pass 1: structured tables ──────────────────────────
+                for table in page.extract_tables():
+                    parsed = _parse_table(table)
+                    items_table.extend(parsed)
 
-        meta = _sniff_header_meta(full_text)
-        # Remove obvious duplicates by SKU
-        seen, deduped = set(), []
-        for it in items:
-            key = it["SKU"].lower()
-            if key not in seen:
+                # ── Pass 2: text lines ─────────────────────────────────
+                in_items = False
+                for line in lines:
+                    if ITEM_HEADER_RE.search(line):
+                        in_items = True
+                        continue
+                    if not in_items:
+                        continue
+                    if FOOTER_RE.match(line):
+                        in_items = False
+                        continue
+
+                    m_start = ARTICLE_START.match(line)
+                    if m_start:
+                        code = m_start.group(1)
+                        if not HAS_DOT.search(code):   # must have dot to be valid code
+                            continue
+                        rest  = line[m_start.end():]
+                        m_qty = QTY_UNIT.search(rest)
+                        qty   = int(m_qty.group(1)) if m_qty else 1
+                        desc  = rest[:m_qty.start()].strip() if m_qty else rest.strip()
+                        items_text.append({"SKU": code, "Description": desc, "Qty": qty})
+
+        # Prefer table items if found (more structured); otherwise use text pass
+        raw_items = items_table if items_table else items_text
+
+        # Deduplicate by SKU (keep first occurrence)
+        seen, items = set(), []
+        for it in raw_items:
+            key = it["SKU"].strip().lower()
+            if key and key not in seen:
                 seen.add(key)
-                deduped.append(it)
+                items.append({"SKU": it["SKU"], "Description": it["Description"],
+                              "Qty": it["Qty"]})
 
-        meta["items"] = deduped
-        return meta
+        # ── Meta ──────────────────────────────────────────────────────
+        brand = ""
+        m = BRAND_RE.search(full_text)
+        if m:
+            raw = m.group(1).strip()
+            # Trim "GmbH" parent companies → use the cleaner brand token
+            brand = re.split(r'\bGmbH\b', raw)[0].strip().rstrip(",").strip()
+
+        po_number = ""
+        m = INV_RE.search(full_text)
+        if m:
+            po_number = m.group(1)
+        # Supplement with Customer PO No if available
+        m2 = CUST_PO_RE.search(full_text)
+        if m2 and not po_number:
+            po_number = m2.group(1).strip()
+
+        ship_via = ""
+        all_lines = full_text.splitlines()
+        ship_idx = next((i for i, l in enumerate(all_lines)
+                         if re.search(r'Ship Via', l, re.I)), None)
+        if ship_idx is not None:
+            for l in all_lines[ship_idx: ship_idx + 6]:
+                for carrier in CARRIERS:
+                    m = re.search(rf'({re.escape(carrier)}[\w\s]{{0,12}})', l, re.I)
+                    if m:
+                        # Stop at 3+ consecutive spaces (signals next column)
+                        raw_sv = re.split(r'\s{3,}|\bPO\b|\bBox\b|\bRemit\b', m.group(1), flags=re.I)[0]
+                        ship_via = raw_sv.strip()
+                        break
+                if ship_via:
+                    break
+
+        return {"brand": brand, "po_number": po_number,
+                "ship_via": ship_via, "items": items}
 
     def extract_from_excel(file_bytes, filename):
         """Extract line items from Excel or CSV invoice — local, no API."""
