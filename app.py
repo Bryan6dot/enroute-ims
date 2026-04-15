@@ -448,10 +448,10 @@ elif page == "📦 Inventory Control":
                 ][["Order_ID","SKU","Qty_Ordered","Item_Name"]].copy()
                 open_lines["SKU"] = open_lines["SKU"].astype(str).str.strip()
                 open_lines = open_lines[
-                    open_lines["SKU"].ne("") & open_lines["SKU"].ne("nan")
+                    open_lines["SKU"].ne("") & open_lines["SKU"].ne("nan") & open_lines["SKU"].ne("None")
                 ]
                 for _, row in open_lines.iterrows():
-                    key = row["SKU"].upper()
+                    key = str(row["SKU"]).upper()
                     sku_to_open.setdefault(key, []).append({
                         "order": row["Order_ID"],
                         "item":  str(row["Item_Name"])[:50],
