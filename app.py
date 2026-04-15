@@ -432,70 +432,122 @@ elif page == "📦 Inventory Control":
 
     # ── TAB 2: RECEIVE PO ─────────────────────────────────────────────────
     with tab2:
-        st.markdown("#### Receive a Purchase Order")
-        pos_in_transit = [p for p in st.session_state.pos if p.get("status") == "In Transit"]
+        st.markdown("#### Inbound Purchase Orders")
+        st.caption("Read-only · Shopify API not connected · Sorted by ETA")
 
-        if not pos_in_transit:
-            st.info("No POs in transit. Create one in **PO Tracker** first.")
+        pos_all = st.session_state.pos
+        if not pos_all:
+            st.info("No POs registered yet. Create one in **PO Tracker → Create PO**.")
         else:
-            po_options = {
-                f"{p['id']} — {p['brand']} (ETA: {p['eta']})": p
-                for p in pos_in_transit
-            }
-            po = po_options[st.selectbox("Select PO", list(po_options.keys()))]
+            # Build open-orders cross-reference from orders export
+            ord_df2 = st.session_state.ord_df
+            sku_to_open = {}   # SKU (upper) → [{order, item, qty}]
+            if ord_df2 is not None:
+                open_lines = ord_df2[
+                    ord_df2["Fulfillment_Status"].isin(["unfulfilled","partial",""])
+                ][["Order_ID","SKU","Qty_Ordered","Item_Name"]].copy()
+                open_lines["SKU"] = open_lines["SKU"].astype(str).str.strip()
+                open_lines = open_lines[
+                    open_lines["SKU"].ne("") & open_lines["SKU"].ne("nan")
+                ]
+                for _, row in open_lines.iterrows():
+                    key = row["SKU"].upper()
+                    sku_to_open.setdefault(key, []).append({
+                        "order": row["Order_ID"],
+                        "item":  str(row["Item_Name"])[:50],
+                        "qty":   int(row["Qty_Ordered"]),
+                    })
 
-            st.markdown(
-                f"**PO:** `{po['id']}` · Brand: **{po['brand']}** "
-                f"· Destination: **{po.get('location','—')}**"
+            # Sort by ETA
+            def _eta_sort(po):
+                try:
+                    return datetime.strptime(po["eta"], "%Y-%m-%d")
+                except Exception:
+                    return datetime.max
+
+            status_filter = st.selectbox(
+                "Filter by status", ["All","In Transit","Received","Cancelled"],
+                key="recv_filter"
             )
-            st.divider()
+            filtered_pos = sorted(
+                [p for p in pos_all
+                 if status_filter == "All" or p["status"] == status_filter],
+                key=_eta_sort
+            )
 
-            if not po.get("skus"):
-                st.warning("This PO has no line items. Add SKUs in PO Tracker.")
+            if not filtered_pos:
+                st.info(f"No POs with status '{status_filter}'.")
             else:
-                st.markdown("**Line items — enter received quantities:**")
-                rows = []
-                for item in po["skus"]:
-                    c1, c2, c3, c4 = st.columns([2, 4, 1, 1])
-                    c1.text(item["sku"])
-                    c2.text(item.get("desc", ""))
-                    c3.text(f"Ordered: {item['qty']}")
-                    received = c4.number_input(
-                        "Rcvd", min_value=0, max_value=item["qty"] * 2,
-                        value=item["qty"], key=f"rcv_{po['id']}_{item['sku']}",
-                        label_visibility="collapsed",
-                    )
-                    rows.append({"sku": item["sku"], "ordered": item["qty"], "received": received})
+                for po in filtered_pos:
+                    icon = {"In Transit":"🚚","Received":"✅","Cancelled":"❌"}.get(po["status"],"📋")
 
-                scenario = "full"
-                for r in rows:
-                    if r["received"] < r["ordered"]:
-                        scenario = "partial"
-                    elif r["received"] != r["ordered"]:
-                        scenario = "discrepancy"
+                    # Days until ETA
+                    days_label = ""
+                    try:
+                        delta = (datetime.strptime(po["eta"],"%Y-%m-%d").date() - date.today()).days
+                        if delta > 0:   days_label = f" · **{delta}d away**"
+                        elif delta == 0: days_label = " · **Arriving today**"
+                        else:            days_label = f" · **{abs(delta)}d overdue**"
+                    except Exception:
+                        pass
 
-                if scenario == "partial":
-                    st.warning("⚠️ Partial receipt — some quantities below ordered.")
-                elif scenario == "discrepancy":
-                    st.error("🔴 Discrepancy — received differs from ordered.")
+                    # Cross-reference: which open orders need SKUs from this PO
+                    po_skus = {s["sku"].strip().upper() for s in po.get("skus", [])}
+                    matched = []
+                    for sku in po_skus:
+                        for entry in sku_to_open.get(sku, []):
+                            matched.append({**entry, "sku": sku})
 
-                notes = st.text_area("Notes (optional)")
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([3, 3, 2])
+                        c1.markdown(
+                            f"{icon} **{po['id']}** · {po['brand']}"
+                            + (f"\n\nPO#: `{po['po_number']}`"
+                               if po.get("po_number","—") != "—" else "")
+                        )
+                        c2.markdown(
+                            f"📅 ETA: **{po['eta']}**{days_label}  \n"
+                            f"📍 {po.get('location','—')}  \n"
+                            + (f"🚛 {po['ship_via']}"
+                               if po.get("ship_via","—") != "—" else "")
+                        )
+                        c3.markdown(
+                            f"Status: **{po['status']}**  \n"
+                            f"Lines: **{len(po.get('skus',[]))}**  \n"
+                            f"Created: {po['created']}"
+                        )
 
-                if st.button("✅ Confirm Receipt", type="primary"):
-                    shopify_preview(
-                        endpoint="/admin/api/2024-01/inventory_levels/adjust.json",
-                        method="POST",
-                        payload={
-                            "po_id":      po["id"],
-                            "location":   po.get("location","—"),
-                            "received_at":datetime.now().isoformat(),
-                            "scenario":   scenario,
-                            "line_items": [{"sku":r["sku"],"qty":r["received"]} for r in rows],
-                            "notes":      notes,
-                        },
-                        description="Each line item adjusted in Shopify Inventory API.",
-                    )
-                    po["status"] = "Received"
+                        # Alert banner if open orders waiting for this PO
+                        if matched:
+                            st.warning(
+                                f"🔔 **{len(matched)} open order line(s) need items from this PO** — "
+                                f"these orders can be fulfilled once this shipment arrives."
+                            )
+
+                        # Line items table with open-order tags
+                        if po.get("skus"):
+                            with st.expander(f"📋 {len(po['skus'])} line items"):
+                                sku_df = pd.DataFrame(po["skus"]).rename(
+                                    columns={"sku":"SKU","desc":"Description","qty":"Qty Ordered"}
+                                )
+                                def _tag(sku):
+                                    hits = sku_to_open.get(sku.strip().upper(), [])
+                                    return f"🔔 {len(hits)} order(s) waiting" if hits else "—"
+                                sku_df["Open Orders"] = sku_df["SKU"].apply(_tag)
+                                st.dataframe(sku_df, use_container_width=True, hide_index=True)
+
+                        # Open orders detail
+                        if matched:
+                            with st.expander(
+                                f"🔔 Open orders waiting for items in this PO ({len(matched)} lines)"
+                            ):
+                                st.caption(
+                                    "These unfulfilled orders require SKUs arriving in this shipment. "
+                                    "Once received, they can be picked and shipped."
+                                )
+                                mo_df = pd.DataFrame(matched)[["order","sku","item","qty"]]
+                                mo_df.columns = ["Order ID","SKU","Item","Qty Needed"]
+                                st.dataframe(mo_df, use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -729,6 +781,29 @@ elif page == "📋 PO Tracker":
 
     # ── TAB 1: CREATE PO ─────────────────────────────────────────────────
     with tab1:
+
+        # ── Confirmation banner — shown immediately after publish ──────
+        if st.session_state.get("po_published"):
+            pub = st.session_state.po_published
+            st.success(
+                f"✅ **PO added** — `{pub['id']}` · {pub['brand']} · "
+                f"{pub['lines']} items · now visible in **Receive PO**."
+            )
+            st.markdown(f"""
+| Field | Value |
+|---|---|
+| PO ID | `{pub['id']}` |
+| Brand | {pub['brand']} |
+| ETA | {pub['eta']} |
+| Destination | {pub['location']} |
+| Line items | {pub['lines']} |
+| Ship Via | {pub.get('ship_via','—')} |
+""")
+            if st.button("➕ Create another PO", type="primary"):
+                st.session_state.po_published = None
+                st.rerun()
+            st.stop()   # ← nothing below renders while confirmation is visible
+
         st.markdown("#### New Purchase Order")
 
         # ── STEP 1: Upload invoice ─────────────────────────────────────
@@ -880,7 +955,14 @@ elif page == "📋 PO Tracker":
                     ],
                 })
                 # Store confirmation info, clear form
-                st.session_state.po_published    = {"id": new_id, "brand": brand, "lines": len(valid_lines)}
+                st.session_state.po_published = {
+                    "id":       new_id,
+                    "brand":    brand,
+                    "lines":    len(valid_lines),
+                    "eta":      str(eta),
+                    "location": location,
+                    "ship_via": ship_via or "—",
+                }
                 st.session_state.po_items        = [{"SKU":"","Description":"","Qty":1}]
                 st.session_state.pop("invoice_extracted", None)
                 st.rerun()
