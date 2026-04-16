@@ -464,6 +464,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         oc_fp    = round(oc_ful/oc_total*100,1) if oc_total else 0
         orr_fp   = round(orr_ful/orr_total*100,1) if orr_total else 0
         p100     = round(100-pct_can,1)
+        # Stock sufficient source breakdown
+        if inv_view is not None and ord_view is not None and can_combined > 0:
+            _fulf_can = check_fulfillability(ord_view, inv_view)
+            _can_rows = _fulf_can[_fulf_can["Can_Fulfill"]].copy()
+            _stock_src = inv_view.groupby("SKU").agg(
+                _av=("Available","sum"), _inc=("Incoming","sum"), _oh=("On_Hand","sum")
+            ).reset_index()
+            _can_rows = _can_rows.merge(_stock_src, on="SKU", how="left").fillna(0)
+            can_from_available  = int((_can_rows["_av"] >= _can_rows["Qty_Ordered"]).sum())
+            can_from_incoming   = int(can_combined - can_from_available)
+            total_available_in_can = int(_can_rows["_av"].sum())
+            total_onhand_in_can    = int(_can_rows["_oh"].sum())
+            pct_from_available  = round(can_from_available / can_combined * 100, 1)
+        else:
+            can_from_available = can_from_incoming = 0
+            total_available_in_can = total_onhand_in_can = 0
+            pct_from_available = 0
         oc_wt    = oc_wait
         orr_wt   = orr_wait
         cc_pct_with_mov = cc["pct_with_mov"]; cc_pct_no_mov = cc["pct_no_mov"]
@@ -586,6 +603,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="fc-box"><div class="fc-lbl">Stock short</div><div class="fc-val" style="color:#E24B4A;">{cannot_combined:,}</div><div class="fc-sub" style="color:#E24B4A;">{p100}%</div></div>
     <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_cover:,}</div><div class="fc-sub" style="color:#888;">of {cannot_combined} short</div></div>
   </div>
+  <div style="border-top:1px solid #f0f0f0;padding-top:10px;margin-top:2px;">
+    <div style="font-size:10px;color:#888;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Stock sufficient — source breakdown</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
+      <div style="padding:8px 10px;border-radius:6px;background:#f0faf5;">
+        <div style="font-size:10px;color:#0F6E56;margin-bottom:3px;">From Available</div>
+        <div style="font-size:17px;font-weight:500;color:#0F6E56;">{can_from_available:,}</div>
+        <div style="font-size:10px;color:#1D9E75;margin-top:1px;">{pct_from_available}% of sufficient</div>
+      </div>
+      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">Available units total</div>
+        <div style="font-size:17px;font-weight:500;">{total_available_in_can:,}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">across fulfillable lines</div>
+      </div>
+      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">Incoming covers</div>
+        <div style="font-size:17px;font-weight:500;">{can_from_incoming:,}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">lines need incoming stock</div>
+      </div>
+      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">On Hand total</div>
+        <div style="font-size:17px;font-weight:500;">{total_onhand_in_can:,}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">units behind these orders</div>
+      </div>
+    </div>
+  </div>
 </div>
 </div>
 <script>
@@ -617,7 +659,7 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
         html_dash = _build_dashboard_html(
             inv_cc_d, inv_rr_d, ord_cc_d, ord_rr_d, inv_view, ord_view
         )
-        components.html(html_dash, height=1020, scrolling=False)
+        components.html(html_dash, height=1060, scrolling=False)
 
     # ── Transit info banner ───────────────────────────────────────────
     _pos_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
@@ -634,10 +676,38 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
         if _n:
             st.info(f"🚚 **{_n} open order line(s)** cannot be filled today but have sufficient quantity arriving in an **In Transit PO**.")
 
-    # ── Detail expanders ──────────────────────────────────────────────
-    if inv_view is not None or ord_view is not None:
-        st.markdown("---")
+    # ── Detail expanders — ordered per spec ──────────────────────────
 
+    # Build fulfillability detail once (used in two expanders below)
+    _fulf_detail = None
+    _can_df = _cant_df = pd.DataFrame()
+    if ord_view is not None and inv_view is not None:
+        _fulf_detail = check_fulfillability(ord_view, inv_view)
+        _now_ts = pd.Timestamp.now(tz="UTC")
+        _open_ord = ord_view[
+            ord_view["Fulfillment_Status"].isin(["unfulfilled","partial",""])
+        ].drop_duplicates("Order_ID")[["Order_ID","Created_At","Financial_Status"]].copy()
+        _open_ord["Days Open"] = (
+            (_now_ts - _open_ord["Created_At"]).dt.total_seconds() / 86400
+        ).round(1)
+        _fulf_t = _fulf_detail.merge(_open_ord[["Order_ID","Days Open"]], on="Order_ID", how="left")
+
+        _pos_t = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
+        _tqty = {}
+        for _p in _pos_t:
+            for _s in _p.get("skus",[]):
+                _tqty[_s["sku"].strip().upper()] = _tqty.get(_s["sku"].strip().upper(),0)+int(_s.get("qty",0))
+        def _ts(row):
+            in_t = _tqty.get(row["_sku_up"],0)
+            if in_t==0: return "—",False
+            elif in_t>=row["Gap"]: return f"🚚 Yes ({in_t})",True
+            else: return f"⚠️ Partial ({in_t}/{row['Gap']})",False
+        _cant_df = _fulf_t[~_fulf_t["Can_Fulfill"]].copy()
+        _cant_df["_sku_up"] = _cant_df["SKU"].astype(str).str.strip().str.upper()
+        _cant_df[["Transit_Status","_covered"]] = _cant_df.apply(lambda r: pd.Series(_ts(r)), axis=1)
+        _can_df  = _fulf_t[_fulf_t["Can_Fulfill"]].sort_values("Days Open", ascending=False)
+
+    # 1. Inventory detail by location
     if inv_view is not None:
         loc_df_exp, _ = _loc_stats(inv_view)
         display = loc_df_exp.copy()
@@ -651,61 +721,7 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
                 use_container_width=True, hide_index=True,
             )
 
-    if ord_view is not None and inv_view is not None:
-        fulf = check_fulfillability(ord_view, inv_view)
-
-        # Add open time in days to each order line
-        now_ts = pd.Timestamp.now(tz="UTC")
-        open_ord = ord_view[
-            ord_view["Fulfillment_Status"].isin(["unfulfilled","partial",""])
-        ].drop_duplicates("Order_ID")[["Order_ID","Created_At","Financial_Status"]].copy()
-        open_ord["Days Open"] = (
-            (now_ts - open_ord["Created_At"]).dt.total_seconds() / 86400
-        ).round(1)
-
-        fulf_t = fulf.merge(open_ord[["Order_ID","Days Open"]], on="Order_ID", how="left")
-
-        pos_in_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
-        transit_qty = {}
-        for p in pos_in_transit:
-            for s in p.get("skus",[]):
-                key = s["sku"].strip().upper()
-                transit_qty[key] = transit_qty.get(key,0) + int(s.get("qty",0))
-        def _ts(row):
-            in_t = transit_qty.get(row["_sku_up"],0)
-            if in_t==0: return "—",False
-            elif in_t>=row["Gap"]: return f"🚚 Yes ({in_t})",True
-            else: return f"⚠️ Partial ({in_t}/{row['Gap']})",False
-
-        cant_df = fulf_t[~fulf_t["Can_Fulfill"]].copy()
-        cant_df["_sku_up"] = cant_df["SKU"].astype(str).str.strip().str.upper()
-        cant_df[["Transit_Status","_covered"]] = cant_df.apply(lambda r: pd.Series(_ts(r)), axis=1)
-        can_df = fulf_t[fulf_t["Can_Fulfill"]].sort_values("Days Open", ascending=False)
-
-        # Summary badges
-        if not can_df.empty or not cant_df.empty:
-            c1, c2 = st.columns(2)
-            with c1:
-                avg_can = round(can_df["Days Open"].mean(), 1) if not can_df.empty else 0
-                with st.expander(f"✅ {len(can_df)} lines ready to ship — avg {avg_can} days open"):
-                    st.dataframe(
-                        can_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
-                                "Available_Stock","Financial_Status","Days Open"]]
-                        .rename(columns={"Order_ID":"Order","Item_Name":"Item",
-                                         "Qty_Ordered":"Qty","Available_Stock":"In Stock",
-                                         "Financial_Status":"Status"}),
-                        use_container_width=True, hide_index=True,
-                    )
-            with c2:
-                avg_cant = round(cant_df["Days Open"].mean(), 1) if not cant_df.empty else 0
-                with st.expander(f"❌ {len(cant_df)} lines stock short — avg {avg_cant} days open"):
-                    show = cant_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
-                                    "Available_Stock","Gap","Financial_Status",
-                                    "Transit_Status","Days Open"]].copy()
-                    show.columns = ["Order","SKU","Item","Qty","In Stock","Gap",
-                                    "Status","In Transit PO","Days Open"]
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-
+    # 2. All orders
     if ord_view is not None:
         with st.expander("📋 All orders"):
             order_level = ord_view.drop_duplicates("Order_ID")[["Order_ID","Financial_Status","Fulfillment_Status","Created_At","Fulfilled_At","Subtotal","Total","Shipping_Method","Vendor"]].copy()
@@ -713,18 +729,38 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
             order_level["Fulfilled_At"] = order_level["Fulfilled_At"].dt.strftime("%Y-%m-%d %H:%M")
             st.dataframe(order_level, use_container_width=True, hide_index=True)
 
-    # ── Inventory movement detail ─────────────────────────────────────
-    if inv_view is not None and ord_view is not None:
-        st.markdown("---")
-        st.caption("Inventory movement analysis — based on orders in current export period")
+    # 3. Lines ready to ship + lines stock short (side by side)
+    if not _can_df.empty or not _cant_df.empty:
+        c1, c2 = st.columns(2)
+        with c1:
+            avg_can = round(_can_df["Days Open"].mean(), 1) if not _can_df.empty else 0
+            with st.expander(f"✅ {len(_can_df)} lines ready to ship — avg {avg_can} days open"):
+                st.dataframe(
+                    _can_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
+                              "Available_Stock","Financial_Status","Days Open"]]
+                    .rename(columns={"Order_ID":"Order","Item_Name":"Item",
+                                     "Qty_Ordered":"Qty","Available_Stock":"In Stock",
+                                     "Financial_Status":"Status"}),
+                    use_container_width=True, hide_index=True,
+                )
+        with c2:
+            avg_cant = round(_cant_df["Days Open"].mean(), 1) if not _cant_df.empty else 0
+            with st.expander(f"❌ {len(_cant_df)} lines stock short — avg {avg_cant} days open"):
+                show = _cant_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
+                                  "Available_Stock","Gap","Financial_Status",
+                                  "Transit_Status","Days Open"]].copy()
+                show.columns = ["Order","SKU","Item","Qty","In Stock","Gap",
+                                 "Status","In Transit PO","Days Open"]
+                st.dataframe(show, use_container_width=True, hide_index=True)
 
+    # 4. Inventory movement detail
+    if inv_view is not None and ord_view is not None:
+        st.caption("Inventory movement analysis — based on orders in current export period")
         ord_skus_set = set(ord_view["SKU"].astype(str).str.strip().dropna())
         ord_skus_set.discard(""); ord_skus_set.discard("nan")
-
         inv_active = inv_view.copy()
         sku_oh = inv_active.groupby("SKU")["On_Hand"].sum()
         active_skus = sku_oh[sku_oh > 0].index
-
         inv_active = inv_active[inv_active["SKU"].isin(active_skus)]
         inv_summary = inv_active.groupby(["SKU","Title"]).agg(
             On_Hand   =("On_Hand",   "sum"),
@@ -732,14 +768,11 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
             Committed =("Committed", "sum"),
             Incoming  =("Incoming",  "sum"),
         ).reset_index()
-
         inv_summary["Movement"] = inv_summary["SKU"].apply(
             lambda s: "With movement" if s in ord_skus_set else "No movement"
         )
-
         with_mov = inv_summary[inv_summary["Movement"] == "With movement"].sort_values("On_Hand", ascending=False)
         no_mov   = inv_summary[inv_summary["Movement"] == "No movement"].sort_values("On_Hand", ascending=False)
-
         c1, c2 = st.columns(2)
         with c1:
             with st.expander(f"✅ {len(with_mov):,} SKUs with movement — {int(with_mov['On_Hand'].sum()):,} units on hand"):
@@ -751,7 +784,7 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
                 )
         with c2:
             with st.expander(f"⚠️ {len(no_mov):,} SKUs with no movement — {int(no_mov['On_Hand'].sum()):,} units on hand"):
-                st.caption("Active stock (On Hand > 0) with no sales in the current export period")
+                st.caption("Active stock with no sales in current export period")
                 st.dataframe(
                     no_mov[["SKU","Title","On_Hand","Available","Committed","Incoming"]]
                     .rename(columns={"On_Hand":"On Hand"}),
