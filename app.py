@@ -387,7 +387,7 @@ if page == "📊 Dashboard":
 
         css = """*{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:transparent;color:#111;}
-.dash{padding:4px 0 12px;}
+.dash{padding:4px 0 32px;}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
 .store-card,.combined,.order-card,.fulfill-section{background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:16px;}
 .combined,.fulfill-section{margin-bottom:14px;}
@@ -706,7 +706,7 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
         html_dash = _build_dashboard_html(
             inv_cc_d, inv_rr_d, ord_cc_d, ord_rr_d, inv_view, ord_view
         )
-        components.html(html_dash, height=1060, scrolling=False)
+        components.html(html_dash, height=1110, scrolling=False)
 
     # ── Transit info banner ───────────────────────────────────────────
     _pos_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
