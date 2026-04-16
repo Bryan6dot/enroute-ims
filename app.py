@@ -352,7 +352,25 @@ if page == "📊 Dashboard":
                 )
             return html
 
-        pos_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
+        pos_transit   = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
+        pos_arrived   = [p for p in st.session_state.pos if p.get("status")=="Arrived"]
+        pos_completed = [p for p in st.session_state.pos if p.get("status")=="Completed"]
+
+        # Avg time arrived → completed (hours)
+        po_proc_times = []
+        for p in pos_completed:
+            try:
+                arr = datetime.strptime(p["arrived_at"],   "%Y-%m-%d %H:%M")
+                cmp = datetime.strptime(p["completed_at"], "%Y-%m-%d %H:%M")
+                hrs = (cmp - arr).total_seconds() / 3600
+                if hrs >= 0: po_proc_times.append(hrs)
+            except: pass
+        po_avg_hrs = round(sum(po_proc_times)/len(po_proc_times), 1) if po_proc_times else 0
+
+        n_po_transit   = len(pos_transit)
+        n_po_arrived   = len(pos_arrived)
+        n_po_completed = len(pos_completed)
+
         transit_qty = {}
         for p in pos_transit:
             for s in p.get("skus",[]):
@@ -447,6 +465,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .fc-val{font-size:18px;font-weight:500;}
 .fc-sub{font-size:10px;margin-top:1px;}
 .divider{height:1px;background:#f0f0f0;margin:12px 0;}
+@media(prefers-color-scheme:dark){.po-kpi{background:#1a1a1a!important;border-color:#2e2e2e!important;}}
 .bar-item{display:flex;flex-direction:column;align-items:center;}
 .bar-seg-wrap{display:flex;gap:4px;align-items:flex-end;}
 .bar-seg{width:28px;border-radius:3px 3px 0 0;transition:height .8s cubic-bezier(.4,0,.2,1);}
@@ -609,6 +628,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   </div>
   <div class="loc-grid">{loc_html}</div>
 </div>
+<div class="sec-lbl">Purchase orders — receiving status</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;">
+  <div class="po-kpi" style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px 14px;">
+    <div style="font-size:10px;color:#888;margin-bottom:3px;">In Transit</div>
+    <div style="font-size:22px;font-weight:500;">{n_po_transit}</div>
+    <div style="font-size:10px;color:#aaa;margin-top:2px;">shipments expected</div>
+  </div>
+  <div class="po-kpi" style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px 14px;">
+    <div style="font-size:10px;color:#888;margin-bottom:3px;">Arrived</div>
+    <div style="font-size:22px;font-weight:500;color:#BA7517;">{n_po_arrived}</div>
+    <div style="font-size:10px;color:#aaa;margin-top:2px;">waiting to be entered</div>
+  </div>
+  <div class="po-kpi" style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px 14px;">
+    <div style="font-size:10px;color:#888;margin-bottom:3px;">Completed</div>
+    <div style="font-size:22px;font-weight:500;color:#1D9E75;">{n_po_completed}</div>
+    <div style="font-size:10px;color:#aaa;margin-top:2px;">entered in Shopify</div>
+  </div>
+  <div class="po-kpi" style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px 14px;">
+    <div style="font-size:10px;color:#888;margin-bottom:3px;">Avg receive → complete</div>
+    <div style="font-size:22px;font-weight:500;">{po_avg_hrs} hrs</div>
+    <div style="font-size:10px;color:#aaa;margin-top:2px;">arrived to Shopify entry</div>
+  </div>
+</div>
 <div class="sec-lbl">Orders — store comparison</div>
 <div class="order-row">
 <div class="order-card">
@@ -706,7 +748,7 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
         html_dash = _build_dashboard_html(
             inv_cc_d, inv_rr_d, ord_cc_d, ord_rr_d, inv_view, ord_view
         )
-        components.html(html_dash, height=1110, scrolling=False)
+        components.html(html_dash, height=1230, scrolling=False)
 
     # ── Transit info banner ───────────────────────────────────────────
     _pos_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
@@ -979,15 +1021,26 @@ elif page == "📦 Inventory Control":
     # ── TAB 2: RECEIVE PO ─────────────────────────────────────────────────
     with tab2:
         st.markdown("#### Inbound Purchase Orders")
-        st.caption("Read-only · Shopify API not connected · Sorted by ETA")
+        st.caption("Sorted by ETA · Check Arrived when shipment lands · Check Completed once entered in Shopify")
 
         pos_all = st.session_state.pos
         if not pos_all:
             st.info("No POs registered yet. Create one in **PO Tracker → Create PO**.")
         else:
-            # Build open-orders cross-reference from orders export
+            # Auto-mark Arrived if ETA has passed and not yet marked
+            for po in pos_all:
+                try:
+                    eta_date = datetime.strptime(po["eta"], "%Y-%m-%d").date()
+                    if eta_date <= date.today() and po.get("status") == "In Transit":
+                        po["status"] = "Arrived"
+                        if not po.get("arrived_at"):
+                            po["arrived_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+
+            # Open-orders cross-reference
             ord_df2 = st.session_state.ord_df
-            sku_to_open = {}   # SKU (upper) → [{order, item, qty}]
+            sku_to_open = {}
             if ord_df2 is not None:
                 open_lines = ord_df2[
                     ord_df2["Fulfillment_Status"].isin(["unfulfilled","partial",""])
@@ -997,22 +1050,19 @@ elif page == "📦 Inventory Control":
                     open_lines["SKU"].ne("") & open_lines["SKU"].ne("nan") & open_lines["SKU"].ne("None")
                 ]
                 for _, row in open_lines.iterrows():
-                    key = str(row["SKU"]).upper()
-                    sku_to_open.setdefault(key, []).append({
+                    sku_to_open.setdefault(str(row["SKU"]).upper(), []).append({
                         "order": row["Order_ID"],
                         "item":  str(row["Item_Name"])[:50],
                         "qty":   int(row["Qty_Ordered"]),
                     })
 
-            # Sort by ETA
             def _eta_sort(po):
-                try:
-                    return datetime.strptime(po["eta"], "%Y-%m-%d")
-                except Exception:
-                    return datetime.max
+                try: return datetime.strptime(po["eta"], "%Y-%m-%d")
+                except: return datetime.max
 
             status_filter = st.selectbox(
-                "Filter by status", ["All","In Transit","Received","Cancelled"],
+                "Filter by status",
+                ["All", "In Transit", "Arrived", "Completed", "Cancelled"],
                 key="recv_filter"
             )
             filtered_pos = sorted(
@@ -1025,19 +1075,19 @@ elif page == "📦 Inventory Control":
                 st.info(f"No POs with status '{status_filter}'.")
             else:
                 for po in filtered_pos:
-                    icon = {"In Transit":"🚚","Received":"✅","Cancelled":"❌"}.get(po["status"],"📋")
+                    status_icon = {
+                        "In Transit": "🚚", "Arrived": "📦",
+                        "Completed": "✅", "Cancelled": "❌"
+                    }.get(po.get("status",""), "📋")
 
-                    # Days until ETA
-                    days_label = ""
                     try:
                         delta = (datetime.strptime(po["eta"],"%Y-%m-%d").date() - date.today()).days
-                        if delta > 0:   days_label = f" · **{delta}d away**"
+                        if delta > 0:    days_label = f" · **{delta}d away**"
                         elif delta == 0: days_label = " · **Arriving today**"
                         else:            days_label = f" · **{abs(delta)}d overdue**"
-                    except Exception:
-                        pass
+                    except:
+                        days_label = ""
 
-                    # Cross-reference: which open orders need SKUs from this PO
                     po_skus = {s["sku"].strip().upper() for s in po.get("skus", [])}
                     matched = []
                     for sku in po_skus:
@@ -1045,52 +1095,107 @@ elif page == "📦 Inventory Control":
                             matched.append({**entry, "sku": sku})
 
                     with st.container(border=True):
+                        # Header row
                         c1, c2, c3 = st.columns([3, 3, 2])
                         c1.markdown(
-                            f"{icon} **{po['id']}** · {po['brand']}"
+                            f"{status_icon} **{po['id']}** · {po['brand']}"
                             + (f"\n\nPO#: `{po['po_number']}`"
                                if po.get("po_number","—") != "—" else "")
                         )
                         c2.markdown(
                             f"📅 ETA: **{po['eta']}**{days_label}  \n"
                             f"📍 {po.get('location','—')}  \n"
-                            + (f"🚛 {po['ship_via']}"
-                               if po.get("ship_via","—") != "—" else "")
+                            + (f"🚛 {po['ship_via']}" if po.get("ship_via","—") != "—" else "")
                         )
                         c3.markdown(
-                            f"Status: **{po['status']}**  \n"
+                            f"Status: **{po.get('status','')}**  \n"
                             f"Lines: **{len(po.get('skus',[]))}**  \n"
                             f"Created: {po['created']}"
                         )
 
-                        # Alert banner if open orders waiting for this PO
+                        # ── Arrived / Completed checkboxes ──────────────
+                        st.divider()
+                        cb1, cb2, info_col = st.columns([2, 2, 4])
+
+                        is_arrived   = po.get("status") in ("Arrived","Completed")
+                        is_completed = po.get("status") == "Completed"
+
+                        arrived_check = cb1.checkbox(
+                            "📦 Arrived",
+                            value=is_arrived,
+                            key=f"arr_{po['id']}",
+                            help="Mark when shipment physically arrives at warehouse"
+                        )
+                        completed_check = cb2.checkbox(
+                            "✅ Completed",
+                            value=is_completed,
+                            key=f"cmp_{po['id']}",
+                            help="Mark when items have been entered in Shopify",
+                            disabled=(not is_arrived and not arrived_check)
+                        )
+
+                        # Handle state transitions
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        changed = False
+
+                        if completed_check and not is_completed:
+                            po["status"]       = "Completed"
+                            po["completed_at"] = now_str
+                            if not po.get("arrived_at"):
+                                po["arrived_at"] = now_str
+                            changed = True
+                        elif not completed_check and is_completed:
+                            po["status"] = "Arrived"
+                            po.pop("completed_at", None)
+                            changed = True
+                        elif arrived_check and not is_arrived:
+                            po["status"]     = "Arrived"
+                            po["arrived_at"] = now_str
+                            changed = True
+                        elif not arrived_check and is_arrived and not is_completed:
+                            po["status"] = "In Transit"
+                            po.pop("arrived_at", None)
+                            changed = True
+
+                        if changed:
+                            st.rerun()
+
+                        # Timestamps
+                        ts_parts = []
+                        if po.get("arrived_at"):
+                            ts_parts.append(f"Arrived: `{po['arrived_at']}`")
+                        if po.get("completed_at"):
+                            ts_parts.append(f"Completed: `{po['completed_at']}`")
+                            try:
+                                arr = datetime.strptime(po["arrived_at"], "%Y-%m-%d %H:%M")
+                                cmp = datetime.strptime(po["completed_at"], "%Y-%m-%d %H:%M")
+                                hrs = round((cmp - arr).total_seconds() / 3600, 1)
+                                ts_parts.append(f"⏱ {hrs}h to complete")
+                            except:
+                                pass
+                        if ts_parts:
+                            info_col.caption("  ·  ".join(ts_parts))
+
+                        # Open orders alert
                         if matched:
                             st.warning(
-                                f"🔔 **{len(matched)} open order line(s) need items from this PO** — "
-                                f"these orders can be fulfilled once this shipment arrives."
+                                f"🔔 **{len(matched)} open order line(s) need items from this PO**"
                             )
 
-                        # Line items table with open-order tags
+                        # Line items
                         if po.get("skus"):
                             with st.expander(f"📋 {len(po['skus'])} line items"):
                                 sku_df = pd.DataFrame(po["skus"]).rename(
                                     columns={"sku":"SKU","desc":"Description","qty":"Qty Ordered"}
                                 )
-                                def _tag(sku):
-                                    hits = sku_to_open.get(sku.strip().upper(), [])
-                                    return f"🔔 {len(hits)} order(s) waiting" if hits else "—"
-                                sku_df["Open Orders"] = sku_df["SKU"].apply(_tag)
+                                sku_df["Open Orders"] = sku_df["SKU"].apply(
+                                    lambda s: f"🔔 {len(sku_to_open.get(s.strip().upper(),[]))} waiting"
+                                    if sku_to_open.get(s.strip().upper()) else "—"
+                                )
                                 st.dataframe(sku_df, use_container_width=True, hide_index=True)
 
-                        # Open orders detail
                         if matched:
-                            with st.expander(
-                                f"🔔 Open orders waiting for items in this PO ({len(matched)} lines)"
-                            ):
-                                st.caption(
-                                    "These unfulfilled orders require SKUs arriving in this shipment. "
-                                    "Once received, they can be picked and shipped."
-                                )
+                            with st.expander(f"🔔 Open orders waiting ({len(matched)} lines)"):
                                 mo_df = pd.DataFrame(matched)[["order","sku","item","qty"]]
                                 mo_df.columns = ["Order ID","SKU","Item","Qty Needed"]
                                 st.dataframe(mo_df, use_container_width=True, hide_index=True)
