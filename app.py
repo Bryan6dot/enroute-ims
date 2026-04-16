@@ -5,6 +5,7 @@ Single-file Streamlit app. Requires data_engine.py in the same folder.
 
 import streamlit as st
 import pandas as pd
+import streamlit.components.v1 as components
 from datetime import date, datetime
 
 st.set_page_config(
@@ -270,177 +271,389 @@ if page == "📊 Dashboard":
     inv_view = _filter_store(inv_df, sel_store) if sel_store else inv_df
     ord_view = _filter_store(ord_df, sel_store) if sel_store else ord_df
 
-    # ── SECTION 1: INVENTORY BY LOCATION ──────────────────────────────────
-    if inv_view is not None:
-        st.markdown("---")
-        st.markdown("### 📦 Shopify Inventory — Stock by Location")
-        st.caption(
-            "Source: Shopify Inventory Export. "
-            "Physical warehouse count not yet uploaded — discrepancy comparison not available."
+    # ── ANIMATED HTML DASHBOARD ────────────────────────────────────────────
+
+    def _build_dashboard_html(inv_cc, inv_rr, ord_cc, ord_rr, inv_view, ord_view):
+        def inv_stats(df):
+            if df is None or len(df) == 0:
+                return {"skus":0,"on_hand":0,"stockouts":0,"available":0,"committed":0}
+            sku_total = df.groupby("SKU")["On_Hand"].sum()
+            return {
+                "skus":      int((sku_total > 0).sum()),
+                "on_hand":   int(df["On_Hand"].sum()),
+                "available": int(df["Available"].sum()),
+                "committed": int(df["Committed"].sum()),
+                "stockouts": int((sku_total == 0).sum()),
+            }
+
+        def fulf_stats(ord_df, inv_df):
+            if ord_df is None or inv_df is None:
+                return {"total":0,"can":0,"cannot":0,"pct":0,"gap":0}
+            f = check_fulfillability(ord_df, inv_df)
+            can = int(f["Can_Fulfill"].sum())
+            tot = len(f)
+            return {"total":tot,"can":can,"cannot":tot-can,
+                    "pct":round(can/tot*100,1) if tot else 0,"gap":int(f["Gap"].sum())}
+
+        def rev(ord_df):
+            if ord_df is None: return 0
+            paid = ord_df[ord_df["Financial_Status"]=="paid"].drop_duplicates("Order_ID")
+            return int(paid["Total"].sum())
+
+        cc  = inv_stats(inv_cc); rr  = inv_stats(inv_rr)
+        fc_cc = fulf_stats(ord_cc, inv_cc); fc_rr = fulf_stats(ord_rr, inv_rr)
+        oc    = orders_summary(ord_cc) if ord_cc is not None else {}
+        orr_s = orders_summary(ord_rr) if ord_rr is not None else {}
+        rev_cc = rev(ord_cc); rev_rr = rev(ord_rr)
+        oc_total  = oc.get("total_orders",0)
+        orr_total = orr_s.get("total_orders",0)
+
+        def loc_rows_html():
+            if inv_view is None: return ""
+            loc_df, grand = _loc_stats(inv_view)
+            if len(loc_df) == 0: return ""
+            def su(df, loc):
+                if df is None: return 0
+                return int(df[df["Location"]==loc]["On_Hand"].sum())
+            html = ""
+            for _, row in loc_df.iterrows():
+                loc = row["Location"]
+                cc_u = su(inv_cc, loc); rr_u = su(inv_rr, loc)
+                tot_u = cc_u + rr_u
+                cp = round(cc_u/tot_u*100) if tot_u else 0
+                rp = 100 - cp
+                html += (
+                    f'<div class="loc-card">'
+                    f'<div class="loc-name">{loc}</div>'
+                    f'<div class="loc-pct">{row["pct_total"]:.1f}%</div>'
+                    f'<div class="loc-split-bar">'
+                    f'<div class="lsb-cc" style="width:{cp}%;"></div>'
+                    f'<div class="lsb-rr" style="width:{rp}%;"></div>'
+                    f'</div>'
+                    f'<div class="loc-meta"><span>CC {cc_u:,}</span><span>RR {rr_u:,}</span></div>'
+                    f'<div class="loc-detail">Avail {row["pct_available"]:.1f}% &middot; Commit {row["pct_committed"]:.1f}%</div>'
+                    f'</div>'
+                )
+            return html
+
+        pos_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
+        transit_qty = {}
+        for p in pos_transit:
+            for s in p.get("skus",[]):
+                k = s["sku"].strip().upper()
+                transit_qty[k] = transit_qty.get(k,0) + int(s.get("qty",0))
+
+        n_transit_cover = 0; total_lines_combined = 0
+        can_combined = 0; gap_combined = 0
+        if inv_view is not None and ord_view is not None:
+            fulf_all = check_fulfillability(ord_view, inv_view)
+            total_lines_combined = len(fulf_all)
+            can_combined = int(fulf_all["Can_Fulfill"].sum())
+            gap_combined = int(fulf_all["Gap"].sum())
+            if transit_qty:
+                cant_all = fulf_all[~fulf_all["Can_Fulfill"]].copy()
+                cant_all["_up"] = cant_all["SKU"].astype(str).str.strip().str.upper()
+                n_transit_cover = int(cant_all.apply(
+                    lambda r: transit_qty.get(r["_up"],0) >= r["Gap"], axis=1
+                ).sum())
+
+        cannot_combined = total_lines_combined - can_combined
+        pct_can = round(can_combined/total_lines_combined*100,1) if total_lines_combined else 0
+        loc_html = loc_rows_html()
+
+        css = """*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:transparent;color:#111;}
+.dash{padding:4px 0 12px;}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
+.store-card,.combined,.order-card,.fulfill-section{background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:16px;}
+.combined,.fulfill-section{margin-bottom:14px;}
+.order-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
+@media(prefers-color-scheme:dark){
+  body{color:#f0f0f0;}
+  .store-card,.combined,.order-card,.fulfill-section{background:#1a1a1a;border-color:#2e2e2e;}
+  .kpi-box,.fc-box{background:#242424;}
+  .loc-card{border-color:#2e2e2e;background:#1a1a1a;}
+  .proc-row{border-color:#2e2e2e;}
+  .divider{background:#2e2e2e;}
+  .leg-val{color:#f0f0f0;}
+  .rev span{color:#f0f0f0;}
+}
+.store-hdr{display:flex;align-items:center;gap:8px;margin-bottom:12px;}
+.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;letter-spacing:.04em;}
+.badge-cc{background:#111;color:#fff;}
+.badge-rr{background:#E24B4A;color:#fff;}
+.store-name{font-size:13px;font-weight:500;}
+.kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;}
+.kpi-box{background:#f5f5f5;border-radius:8px;padding:10px 12px;}
+.kpi-lbl{font-size:10px;color:#888;margin-bottom:3px;letter-spacing:.03em;}
+.kpi-val{font-size:18px;font-weight:500;}
+.kpi-sub{font-size:10px;margin-top:1px;}
+.kpi-sub.up{color:#1D9E75;}
+.pie-lbl-txt{font-size:11px;color:#888;margin-bottom:6px;}
+.pie-section{display:flex;align-items:center;gap:10px;}
+.donut-wrap{position:relative;width:72px;height:72px;flex-shrink:0;}
+.donut-center{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;}
+.legend{display:flex;flex-direction:column;gap:5px;}
+.leg-item{display:flex;align-items:center;gap:6px;font-size:11px;color:#888;}
+.leg-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.leg-val{margin-left:auto;font-weight:500;font-size:11px;color:#111;}
+.sec-lbl{font-size:10px;letter-spacing:.08em;color:#aaa;text-transform:uppercase;margin-bottom:10px;}
+.combined-hdr{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px;}
+.combined-title{font-size:13px;font-weight:500;}
+.combined-sub{font-size:11px;color:#888;}
+.loc-legend{display:flex;gap:12px;font-size:11px;color:#888;}
+.ll-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:3px;}
+.loc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;}
+.loc-card{border:1px solid #e5e5e5;border-radius:8px;padding:10px 12px;}
+.loc-name{font-size:10px;color:#888;margin-bottom:4px;}
+.loc-pct{font-size:19px;font-weight:500;}
+.loc-split-bar{display:flex;height:3px;border-radius:2px;overflow:hidden;margin:6px 0 5px;}
+.lsb-cc{height:100%;background:#111;}
+.lsb-rr{height:100%;background:#E24B4A;}
+.loc-meta{display:flex;justify-content:space-between;font-size:10px;color:#888;}
+.loc-detail{font-size:10px;color:#aaa;margin-top:4px;}
+.proc-row{display:flex;gap:14px;border-top:1px solid #f0f0f0;padding-top:10px;margin-top:10px;}
+.p-lbl{font-size:10px;color:#aaa;}
+.p-val{font-size:15px;font-weight:500;}
+.rev{font-size:11px;color:#888;margin-top:8px;}
+.rev span{font-weight:500;color:#111;}
+.fc-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;}
+.fc-box{background:#f5f5f5;border-radius:8px;padding:10px 12px;}
+.fc-lbl{font-size:10px;color:#888;margin-bottom:3px;}
+.fc-val{font-size:18px;font-weight:500;}
+.fc-sub{font-size:10px;margin-top:1px;}
+.divider{height:1px;background:#f0f0f0;margin:12px 0;}
+.bar-item{display:flex;flex-direction:column;align-items:center;}
+.bar-seg-wrap{display:flex;gap:4px;align-items:flex-end;}
+.bar-seg{width:28px;border-radius:3px 3px 0 0;transition:height .8s cubic-bezier(.4,0,.2,1);}
+.bar-lbl{font-size:10px;color:#888;margin-top:4px;}
+.bar-legend{display:flex;gap:12px;font-size:10px;color:#888;margin-top:6px;justify-content:center;}
+.bl-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:3px;}"""
+
+        cc_can   = fc_cc["can"]; cc_can_not = fc_cc["cannot"]
+        rr_can   = fc_rr["can"]; rr_can_not = fc_rr["cannot"]
+        cc_pct_v = fc_cc["pct"]; rr_pct_v   = fc_rr["pct"]
+        cc_gap   = fc_cc["gap"]; rr_gap     = fc_rr["gap"]
+        cc_so    = cc["stockouts"]; rr_so    = rr["stockouts"]
+        cc_oh    = cc["on_hand"];   rr_oh    = rr["on_hand"]
+        cc_sk    = cc["skus"];      rr_sk    = rr["skus"]
+        oc_ful   = oc.get("fulfilled",0); orr_ful  = orr_s.get("fulfilled",0)
+        oc_unf   = oc.get("unfulfilled",0); orr_unf = orr_s.get("unfulfilled",0)
+        oc_avg   = oc.get("avg_processing_hrs",0)
+        oc_min   = oc.get("min_processing_hrs",0)
+        oc_max   = oc.get("max_processing_hrs",0)
+        orr_avg  = orr_s.get("avg_processing_hrs",0)
+        orr_min  = orr_s.get("min_processing_hrs",0)
+        orr_max  = orr_s.get("max_processing_hrs",0)
+        oc_fp    = round(oc_ful/oc_total*100,1) if oc_total else 0
+        orr_fp   = round(orr_ful/orr_total*100,1) if orr_total else 0
+        p100     = round(100-pct_can,1)
+
+        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>{css}</style></head><body>
+<div class="dash">
+<div class="sec-lbl">Inventory — store comparison</div>
+<div class="split">
+<div class="store-card">
+  <div class="store-hdr"><span class="badge badge-cc">CC</span><span class="store-name">Cycling Store</span></div>
+  <div class="kpi-row">
+    <div class="kpi-box"><div class="kpi-lbl">SKUs w/ stock</div><div class="kpi-val">{cc_sk:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">On Hand</div><div class="kpi-val">{cc_oh:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Stockouts</div><div class="kpi-val" style="color:#E24B4A;">{cc_so:,}</div></div>
+  </div>
+  <div class="pie-lbl-txt">Fulfillability — open orders</div>
+  <div class="pie-section">
+    <div class="donut-wrap"><canvas id="pieCC" width="72" height="72"></canvas><div class="donut-center">{cc_pct_v:.0f}%</div></div>
+    <div class="legend">
+      <div class="leg-item"><div class="leg-dot" style="background:#111;"></div><span>Can fulfill</span><span class="leg-val">{cc_can:,}</span></div>
+      <div class="leg-item"><div class="leg-dot" style="background:#E24B4A;"></div><span>Short</span><span class="leg-val">{cc_can_not:,}</span></div>
+      <div class="leg-item"><div class="leg-dot" style="background:#ccc;"></div><span>Gap (units)</span><span class="leg-val">{cc_gap:,}</span></div>
+    </div>
+  </div>
+</div>
+<div class="store-card">
+  <div class="store-hdr"><span class="badge badge-rr">RR</span><span class="store-name">Running Store</span></div>
+  <div class="kpi-row">
+    <div class="kpi-box"><div class="kpi-lbl">SKUs w/ stock</div><div class="kpi-val">{rr_sk:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">On Hand</div><div class="kpi-val">{rr_oh:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Stockouts</div><div class="kpi-val" style="color:#E24B4A;">{rr_so:,}</div></div>
+  </div>
+  <div class="pie-lbl-txt">Fulfillability — open orders</div>
+  <div class="pie-section">
+    <div class="donut-wrap"><canvas id="pieRR" width="72" height="72"></canvas><div class="donut-center">{rr_pct_v:.0f}%</div></div>
+    <div class="legend">
+      <div class="leg-item"><div class="leg-dot" style="background:#E24B4A;"></div><span>Can fulfill</span><span class="leg-val">{rr_can:,}</span></div>
+      <div class="leg-item"><div class="leg-dot" style="background:#f5a5a5;"></div><span>Short</span><span class="leg-val">{rr_can_not:,}</span></div>
+      <div class="leg-item"><div class="leg-dot" style="background:#ccc;"></div><span>Gap (units)</span><span class="leg-val">{rr_gap:,}</span></div>
+    </div>
+  </div>
+</div>
+</div>
+<div class="combined">
+  <div class="combined-hdr">
+    <div><div class="combined-title">Inventory by location</div><div class="combined-sub">CC vs RR split per location</div></div>
+    <div class="loc-legend"><span><span class="ll-dot" style="background:#111;"></span>CC</span><span><span class="ll-dot" style="background:#E24B4A;"></span>RR</span></div>
+  </div>
+  <div class="loc-grid">{loc_html}</div>
+</div>
+<div class="sec-lbl">Orders — store comparison</div>
+<div class="order-row">
+<div class="order-card">
+  <div class="store-hdr"><span class="badge badge-cc">CC</span><span class="store-name">Cycling orders</span></div>
+  <div class="kpi-row">
+    <div class="kpi-box"><div class="kpi-lbl">Total</div><div class="kpi-val">{oc_total:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Fulfilled</div><div class="kpi-val">{oc_ful:,}</div><div class="kpi-sub up">{oc_fp}%</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Unfulfilled</div><div class="kpi-val" style="color:#E24B4A;">{oc_unf:,}</div></div>
+  </div>
+  <div class="proc-row">
+    <div><div class="p-lbl">Avg</div><div class="p-val">{oc_avg} hrs</div></div>
+    <div><div class="p-lbl">Fastest</div><div class="p-val">{oc_min} hrs</div></div>
+    <div><div class="p-lbl">Slowest</div><div class="p-val" style="color:#E24B4A;">{oc_max} hrs</div></div>
+  </div>
+  <div class="rev">Revenue: <span>${rev_cc:,} CAD</span></div>
+</div>
+<div class="order-card">
+  <div class="store-hdr"><span class="badge badge-rr">RR</span><span class="store-name">Running orders</span></div>
+  <div class="kpi-row">
+    <div class="kpi-box"><div class="kpi-lbl">Total</div><div class="kpi-val">{orr_total:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Fulfilled</div><div class="kpi-val">{orr_ful:,}</div><div class="kpi-sub up">{orr_fp}%</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Unfulfilled</div><div class="kpi-val" style="color:#E24B4A;">{orr_unf:,}</div></div>
+  </div>
+  <div class="proc-row">
+    <div><div class="p-lbl">Avg</div><div class="p-val">{orr_avg} hrs</div></div>
+    <div><div class="p-lbl">Fastest</div><div class="p-val">{orr_min} hrs</div></div>
+    <div><div class="p-lbl">Slowest</div><div class="p-val" style="color:#E24B4A;">{orr_max} hrs</div></div>
+  </div>
+  <div class="rev">Revenue: <span>${rev_rr:,} CAD</span></div>
+</div>
+</div>
+<div class="fulfill-section">
+  <div class="sec-lbl" style="margin-bottom:10px;">Fulfillability — combined</div>
+  <div class="fc-row">
+    <div class="fc-box"><div class="fc-lbl">Open lines</div><div class="fc-val">{total_lines_combined:,}</div></div>
+    <div class="fc-box"><div class="fc-lbl">Stock sufficient</div><div class="fc-val" style="color:#1D9E75;">{can_combined:,}</div><div class="fc-sub" style="color:#1D9E75;">{pct_can}%</div></div>
+    <div class="fc-box"><div class="fc-lbl">Stock short</div><div class="fc-val" style="color:#E24B4A;">{cannot_combined:,}</div><div class="fc-sub" style="color:#E24B4A;">{p100}%</div></div>
+    <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_cover:,}</div><div class="fc-sub" style="color:#888;">of {cannot_combined} short</div></div>
+  </div>
+  <div class="divider"></div>
+  <div class="bar-legend">
+    <span><span class="bl-dot" style="background:#111;"></span>Can fulfill</span>
+    <span><span class="bl-dot" style="background:#E24B4A;"></span>Short</span>
+  </div>
+  <div style="display:flex;gap:24px;align-items:flex-end;height:100px;margin-top:10px;">
+    <div class="bar-item">
+      <div class="bar-seg-wrap">
+        <div class="bar-seg" id="bCC1" style="background:#111;height:0;"></div>
+        <div class="bar-seg" id="bCC2" style="background:#E24B4A;height:0;"></div>
+      </div>
+      <div class="bar-lbl">CC Cycling</div>
+    </div>
+    <div class="bar-item">
+      <div class="bar-seg-wrap">
+        <div class="bar-seg" id="bRR1" style="background:#E24B4A;height:0;"></div>
+        <div class="bar-seg" id="bRR2" style="background:#f5a5a5;height:0;"></div>
+      </div>
+      <div class="bar-lbl">RR Running</div>
+    </div>
+  </div>
+</div>
+</div>
+<script>
+var isDark=window.matchMedia('(prefers-color-scheme:dark)').matches;
+var bg=isDark?'rgba(255,255,255,.1)':'#e5e5e5';
+function drawDonut(id,pct,fill,bg){{
+  var c=document.getElementById(id);if(!c)return;
+  var ctx=c.getContext('2d'),cx=36,cy=36,r=28,lw=7,start=-Math.PI/2,target=pct/100,t0=null;
+  function frame(now){{if(!t0)t0=now;var el=Math.min((now-t0)/900,1);
+    var prog=target*(el<.5?2*el*el:-1+(4-2*el)*el);
+    ctx.clearRect(0,0,72,72);
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.strokeStyle=bg;ctx.lineWidth=lw;ctx.stroke();
+    ctx.beginPath();ctx.arc(cx,cy,r,start,start+Math.PI*2*prog);ctx.strokeStyle=fill;ctx.lineWidth=lw;ctx.lineCap='round';ctx.stroke();
+    if(el<1)requestAnimationFrame(frame);}}
+  requestAnimationFrame(frame);
+}}
+function ab(id,h,d){{setTimeout(function(){{var e=document.getElementById(id);if(e)e.style.height=h+'px';}},d);}}
+var maxV=Math.max({cc_can},{cc_can_not},{rr_can},{rr_can_not},1);
+ab('bCC1',Math.round({cc_can}/maxV*75),200);
+ab('bCC2',Math.round({cc_can_not}/maxV*75),300);
+ab('bRR1',Math.round({rr_can}/maxV*75),400);
+ab('bRR2',Math.round({rr_can_not}/maxV*75),500);
+drawDonut('pieCC',{cc_pct_v},isDark?'#ddd':'#111',bg);
+drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
+</script></body></html>"""
+
+    # ── Render HTML dashboard ─────────────────────────────────────────
+    inv_cc_d = st.session_state.inv_store.get("CC")
+    inv_rr_d = st.session_state.inv_store.get("RR")
+    ord_cc_d = st.session_state.ord_store.get("CC")
+    ord_rr_d = st.session_state.ord_store.get("RR")
+
+    if inv_view is not None or ord_view is not None:
+        html_dash = _build_dashboard_html(
+            inv_cc_d, inv_rr_d, ord_cc_d, ord_rr_d, inv_view, ord_view
         )
+        components.html(html_dash, height=1020, scrolling=False)
 
-        loc_df, grand_total = _loc_stats(inv_view)
+    # ── Transit info banner ───────────────────────────────────────────
+    _pos_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
+    _transit_qty = {}
+    for _p in _pos_transit:
+        for _s in _p.get("skus",[]):
+            _k = _s["sku"].strip().upper()
+            _transit_qty[_k] = _transit_qty.get(_k,0) + int(_s.get("qty",0))
+    if _transit_qty and inv_view is not None and ord_view is not None:
+        _fp = check_fulfillability(ord_view, inv_view)
+        _cant = _fp[~_fp["Can_Fulfill"]].copy()
+        _cant["_up"] = _cant["SKU"].astype(str).str.strip().str.upper()
+        _n = int(_cant.apply(lambda r: _transit_qty.get(r["_up"],0)>=r["Gap"],axis=1).sum())
+        if _n:
+            st.info(f"🚚 **{_n} open order line(s)** cannot be filled today but have sufficient quantity arriving in an **In Transit PO**.")
 
-        # One KPI card per active location
-        cols = st.columns(len(loc_df))
-        for i, row in loc_df.iterrows():
-            with cols[i]:
-                st.metric(
-                    label=f"📍 {row['Location']}",
-                    value=f"{row['pct_total']:.1f}%",
-                    help=f"On Hand: {int(row['On_Hand']):,} units of {int(grand_total):,} total",
-                )
-                st.caption(
-                    f"Available: **{row['pct_available']:.1f}%**  \n"
-                    f"Committed: **{row['pct_committed']:.1f}%**  \n"
-                    f"Incoming: **{int(row['Incoming']):,} units**"
-                )
+    # ── Detail expanders ──────────────────────────────────────────────
+    if inv_view is not None or ord_view is not None:
+        st.markdown("---")
 
-        # Summary table
-        display = loc_df.copy()
+    if inv_view is not None:
+        loc_df_exp, _ = _loc_stats(inv_view)
+        display = loc_df_exp.copy()
         display["% of Total"]  = display["pct_total"].round(1).astype(str) + "%"
         display["% Available"] = display["pct_available"].round(1).astype(str) + "%"
         display["% Committed"] = display["pct_committed"].round(1).astype(str) + "%"
-        st.dataframe(
-            display[["Location","On_Hand","% of Total","Available","% Available",
-                      "Committed","% Committed","Incoming"]]
-            .rename(columns={"On_Hand":"On Hand"}),
-            use_container_width=True, hide_index=True,
-        )
-
-        st.info(
-            "ℹ️ **Discrepancy analysis** requires the physical warehouse count files "
-            "(Cycling Store, Running Store, Warehouse). Upload those to compare "
-            "Shopify stock against real on-hand counts."
-        )
-
-    # ── SECTION 2: ORDERS ─────────────────────────────────────────────────
-    if ord_view is not None:
-        st.markdown("---")
-        st.markdown("### 🚚 Orders")
-
-        summary = orders_summary(ord_view)
-        total   = summary["total_orders"]
-
-        c1, c2, c3, c4 = st.columns(4)
-        kpi(c1, "Total Orders", f"{total:,}")
-        kpi(c2, "✅ Fulfilled",
-            f"{summary['fulfilled']:,}",
-            delta=f"{round(summary['fulfilled']/total*100,1)}% of orders",
-            delta_color="off")
-        kpi(c3, "⏳ Unfulfilled",
-            f"{summary['unfulfilled']:,}",
-            delta="paid · not shipped" if summary["unfulfilled"] else None,
-            delta_color="inverse" if summary["unfulfilled"] else "off")
-        kpi(c4, "🔀 Partial", f"{summary['partial']:,}")
-
-        # In-transit coverage banner — compute here so it shows in summary row
-        _pos_transit = [p for p in st.session_state.pos if p.get("status") == "In Transit"]
-        _transit_qty = {}
-        for _p in _pos_transit:
-            for _s in _p.get("skus", []):
-                _k = _s["sku"].strip().upper()
-                _transit_qty[_k] = _transit_qty.get(_k, 0) + int(_s.get("qty", 0))
-
-        if _transit_qty and inv_view is not None:
-            _fulf_preview = check_fulfillability(ord_view, inv_view)
-            _cant         = _fulf_preview[~_fulf_preview["Can_Fulfill"]].copy()
-            _cant["_up"]  = _cant["SKU"].astype(str).str.strip().str.upper()
-            # Covered = transit qty >= gap needed
-            _n_covered = int(_cant.apply(
-                lambda r: _transit_qty.get(r["_up"], 0) >= r["Gap"], axis=1
-            ).sum())
-            if _n_covered:
-                st.info(
-                    f"🚚 **{_n_covered} open order line(s)** cannot be filled today "
-                    f"but have sufficient SKU quantity arriving in an **In Transit PO**. "
-                    f"See details in *Can We Fulfill Open Orders?* below."
-                )
-
-        c1, c2, c3, c4 = st.columns(4)
-        kpi(c1, "Avg Processing Time",
-            f"{summary['avg_processing_hrs']} hrs",
-            help="Created At → Fulfilled At, fulfilled orders only")
-        kpi(c2, "Fastest",  f"{summary['min_processing_hrs']} hrs")
-        kpi(c3, "Slowest",  f"{summary['max_processing_hrs']} hrs")
-        kpi(c4, "Refunded / Cancelled",
-            f"{summary['refunded']} / {summary['cancelled']}")
-
-        # Fulfillability — only when both files are present
-        if inv_view is not None:
-            st.markdown("---")
-            st.markdown("### 🎯 Can We Fulfill Open Orders?")
-            st.caption("Checks Shopify available stock against each open order line item")
-
-            fulf        = check_fulfillability(ord_view, inv_view)
-            total_lines = len(fulf)
-            can         = int(fulf["Can_Fulfill"].sum())
-            cannot      = total_lines - can
-            pct_can     = round(can / total_lines * 100, 1) if total_lines else 0
-
-            # In-transit coverage: unfulfillable lines whose SKU has ENOUGH qty in transit POs
-            # Build SKU → total units in transit (sum across all In Transit POs)
-            pos_in_transit = [p for p in st.session_state.pos if p.get("status") == "In Transit"]
-            transit_qty = {}   # SKU (upper) → total ordered units in transit
-            for p in pos_in_transit:
-                for s in p.get("skus", []):
-                    key = s["sku"].strip().upper()
-                    transit_qty[key] = transit_qty.get(key, 0) + int(s.get("qty", 0))
-
-            cant_df = fulf[~fulf["Can_Fulfill"]].copy()
-            cant_df["_sku_up"] = cant_df["SKU"].astype(str).str.strip().str.upper()
-
-            def _transit_status(row):
-                in_t = transit_qty.get(row["_sku_up"], 0)
-                if in_t == 0:
-                    return "—", False
-                elif in_t >= row["Gap"]:
-                    return f"🚚 Yes ({in_t} units)", True
-                else:
-                    return f"⚠️ Partial ({in_t}/{row['Gap']} units)", False
-
-            cant_df[["Transit_Status","_covered"]] = cant_df.apply(
-                lambda r: pd.Series(_transit_status(r)), axis=1
+        with st.expander("📦 Inventory detail by location"):
+            st.dataframe(
+                display[["Location","On_Hand","% of Total","Available","% Available","Committed","% Committed","Incoming"]]
+                .rename(columns={"On_Hand":"On Hand"}),
+                use_container_width=True, hide_index=True,
             )
-            n_covered = int(cant_df["_covered"].sum())
 
-            c1, c2, c3, c4, c5 = st.columns(5)
-            kpi(c1, "Open Lines",          f"{total_lines:,}")
-            kpi(c2, "✅ Stock Sufficient",  f"{can:,}",
-                delta=f"{pct_can}%", delta_color="off")
-            kpi(c3, "❌ Stock Insufficient",f"{cannot:,}",
-                delta=f"{round(100-pct_can,1)}%",
-                delta_color="inverse" if cannot else "off")
-            kpi(c4, "🚚 Coverable by PO in Transit", f"{n_covered:,}",
-                delta=f"of {cannot} short lines",
-                delta_color="off",
-                help="Unfulfillable lines whose SKU appears in at least one In Transit PO")
-            kpi(c5, "Total Units Short",   f"{int(fulf['Gap'].sum()):,}",
-                help="Sum of missing units across all unfulfillable lines")
+    if ord_view is not None and inv_view is not None:
+        fulf = check_fulfillability(ord_view, inv_view)
+        pos_in_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
+        transit_qty = {}
+        for p in pos_in_transit:
+            for s in p.get("skus",[]):
+                key = s["sku"].strip().upper()
+                transit_qty[key] = transit_qty.get(key,0) + int(s.get("qty",0))
+        def _ts(row):
+            in_t = transit_qty.get(row["_sku_up"],0)
+            if in_t==0: return "—",False
+            elif in_t>=row["Gap"]: return f"🚚 Yes ({in_t})",True
+            else: return f"⚠️ Partial ({in_t}/{row['Gap']})",False
+        cant_df = fulf[~fulf["Can_Fulfill"]].copy()
+        cant_df["_sku_up"] = cant_df["SKU"].astype(str).str.strip().str.upper()
+        cant_df[["Transit_Status","_covered"]] = cant_df.apply(lambda r: pd.Series(_ts(r)), axis=1)
+        can_df = fulf[fulf["Can_Fulfill"]].sort_values("Order_ID")
+        if not cant_df.empty:
+            with st.expander(f"❌ {len(cant_df)} lines that cannot be fulfilled"):
+                show = cant_df[["Order_ID","SKU","Item_Name","Qty_Ordered","Available_Stock","Gap","Financial_Status","Transit_Status"]].copy()
+                show.columns = ["Order ID","SKU","Item","Qty Ordered","In Stock","Gap","Financial Status","In Transit PO"]
+                st.dataframe(show, use_container_width=True, hide_index=True)
+        if not can_df.empty:
+            with st.expander(f"✅ {len(can_df)} lines ready to ship"):
+                st.dataframe(can_df[["Order_ID","SKU","Item_Name","Qty_Ordered","Available_Stock","Financial_Status"]], use_container_width=True, hide_index=True)
 
-            if not cant_df.empty:
-                with st.expander(f"❌ {len(cant_df)} lines that cannot be fulfilled with current stock"):
-                    show = cant_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
-                                    "Available_Stock","Gap","Financial_Status","Transit_Status"]].copy()
-                    show.columns = ["Order ID","SKU","Item","Qty Ordered",
-                                    "In Stock","Gap","Financial Status","In Transit PO"]
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-
-            can_df = fulf[fulf["Can_Fulfill"]].sort_values("Order_ID")
-            if not can_df.empty:
-                with st.expander(f"✅ {len(can_df)} lines ready to ship"):
-                    st.dataframe(
-                        can_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
-                                "Available_Stock","Financial_Status"]],
-                        use_container_width=True, hide_index=True,
-                    )
-
+    if ord_view is not None:
         with st.expander("📋 All orders"):
-            order_level = ord_view.drop_duplicates("Order_ID")[[
-                "Order_ID","Financial_Status","Fulfillment_Status",
-                "Created_At","Fulfilled_At","Subtotal","Total",
-                "Shipping_Method","Vendor",
-            ]].copy()
+            order_level = ord_view.drop_duplicates("Order_ID")[["Order_ID","Financial_Status","Fulfillment_Status","Created_At","Fulfilled_At","Subtotal","Total","Shipping_Method","Vendor"]].copy()
             order_level["Created_At"]   = order_level["Created_At"].dt.strftime("%Y-%m-%d %H:%M")
             order_level["Fulfilled_At"] = order_level["Fulfilled_At"].dt.strftime("%Y-%m-%d %H:%M")
             st.dataframe(order_level, use_container_width=True, hide_index=True)
