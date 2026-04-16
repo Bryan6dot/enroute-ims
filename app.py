@@ -359,8 +359,8 @@ if page == "📊 Dashboard":
                 k = s["sku"].strip().upper()
                 transit_qty[k] = transit_qty.get(k,0) + int(s.get("qty",0))
 
-        n_transit_cover = 0; total_lines_combined = 0
-        can_combined = 0; gap_combined = 0
+        n_transit_full = 0; n_transit_partial = 0; transit_units_coming = 0
+        total_lines_combined = 0; can_combined = 0; gap_combined = 0
         if inv_view is not None and ord_view is not None:
             fulf_all = check_fulfillability(ord_view, inv_view)
             total_lines_combined = len(fulf_all)
@@ -369,10 +369,11 @@ if page == "📊 Dashboard":
             if transit_qty:
                 cant_all = fulf_all[~fulf_all["Can_Fulfill"]].copy()
                 cant_all["_up"] = cant_all["SKU"].astype(str).str.strip().str.upper()
-                n_transit_cover = int(cant_all.apply(
-                    lambda r: transit_qty.get(r["_up"],0) >= r["Gap"], axis=1
-                ).sum())
-
+                cant_all["_t"]   = cant_all["_up"].map(lambda k: transit_qty.get(k,0))
+                n_transit_full    = int((cant_all["_t"] >= cant_all["Gap"]).sum())
+                n_transit_partial = int(((cant_all["_t"] > 0) & (cant_all["_t"] < cant_all["Gap"])).sum())
+                transit_units_coming = int(cant_all[cant_all["_t"] > 0]["_t"].sum())
+        n_transit_cover = n_transit_full   # keep for backward compat label
         cannot_combined = total_lines_combined - can_combined
         pct_can = round(can_combined/total_lines_combined*100,1) if total_lines_combined else 0
         loc_html = loc_rows_html()
@@ -482,6 +483,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             units_from_incoming    = int(_can_rows["_used_inc"].sum())
             total_onhand_in_can    = int(_can_rows["_oh"].sum())
             total_committed_in_can = int(_can_rows["_com"].sum())
+            total_av_in_can        = int(_can_rows["_av"].sum())
             pct_units_available    = round(units_from_available / total_units_needed * 100, 1) if total_units_needed else 0
             _sbl = inv_view.groupby(["SKU","Location"])["Available"].sum().reset_index()
             _sbl = _sbl[_sbl["Available"] > 0]
@@ -512,6 +514,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             total_units_needed = units_from_available = units_from_incoming = 0
             total_onhand_in_can = total_committed_in_can = 0
             pct_units_available = 0
+            total_av_in_can = 0
             loc_badges_html = ""
             oldest_open_days = 0
         oc_wt    = oc_wait
@@ -634,7 +637,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="fc-box"><div class="fc-lbl">Open lines</div><div class="fc-val">{total_lines_combined:,}</div></div>
     <div class="fc-box"><div class="fc-lbl">Stock sufficient</div><div class="fc-val" style="color:#1D9E75;">{can_combined:,}</div><div class="fc-sub" style="color:#1D9E75;">{pct_can}%</div></div>
     <div class="fc-box"><div class="fc-lbl">Stock short</div><div class="fc-val" style="color:#E24B4A;">{cannot_combined:,}</div><div class="fc-sub" style="color:#E24B4A;">{p100}%</div></div>
-    <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_cover:,}</div><div class="fc-sub" style="color:#888;">of {cannot_combined} short</div></div>
+    <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_full:,} full · {n_transit_partial:,} partial</div><div class="fc-sub" style="color:#888;">{transit_units_coming:,} units coming · of {cannot_combined} short</div></div>
   </div>
   <div style="border-top:1px solid #f0f0f0;padding-top:10px;margin-top:2px;">
     <div style="font-size:10px;color:#888;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Stock sufficient — {can_combined:,} lines · {total_units_needed:,} units · oldest open: {oldest_open_days} days</div>
@@ -642,21 +645,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       <div style="font-size:11px;color:#555;margin-bottom:5px;font-weight:500;">Pick location — where inventory is available</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;">{loc_badges_html}</div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
+      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">On Hand — these SKUs</div>
+        <div style="font-size:17px;font-weight:500;">{total_onhand_in_can:,}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">total physical units</div>
+      </div>
+      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">Available — these SKUs</div>
+        <div style="font-size:17px;font-weight:500;">{total_av_in_can:,}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">free for new orders</div>
+      </div>
+      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">Committed — these SKUs</div>
+        <div style="font-size:17px;font-weight:500;">{total_committed_in_can:,}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">assigned to other orders</div>
+      </div>
       <div style="padding:8px 10px;border-radius:6px;background:#f0faf5;">
-        <div style="font-size:10px;color:#0F6E56;margin-bottom:3px;">Covered by Available</div>
-        <div style="font-size:17px;font-weight:500;color:#0F6E56;">{units_from_available:,} units</div>
-        <div style="font-size:10px;color:#1D9E75;margin-top:1px;">{pct_units_available}% of {total_units_needed:,} needed</div>
-      </div>
-      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">Committed (other orders)</div>
-        <div style="font-size:17px;font-weight:500;">{total_committed_in_can:,} units</div>
-        <div style="font-size:10px;color:#aaa;margin-top:1px;">not available for new orders</div>
-      </div>
-      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">Covered by Incoming</div>
-        <div style="font-size:17px;font-weight:500;">{units_from_incoming:,} units</div>
-        <div style="font-size:10px;color:#aaa;margin-top:1px;">need Shopify incoming to ship</div>
+        <div style="font-size:10px;color:#0F6E56;margin-bottom:3px;">Demand from 520 lines</div>
+        <div style="font-size:17px;font-weight:500;color:#0F6E56;">{total_units_needed:,}</div>
+        <div style="font-size:10px;color:#1D9E75;margin-top:1px;">{pct_units_available}% filled from Available</div>
       </div>
     </div>
   </div>
@@ -704,9 +712,11 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
         _fp = check_fulfillability(ord_view, inv_view)
         _cant = _fp[~_fp["Can_Fulfill"]].copy()
         _cant["_up"] = _cant["SKU"].astype(str).str.strip().str.upper()
-        _n = int(_cant.apply(lambda r: _transit_qty.get(r["_up"],0)>=r["Gap"],axis=1).sum())
+        _n_full = int(_cant.apply(lambda r: _transit_qty.get(r["_up"],0)>=r["Gap"],axis=1).sum())
+        _n_part = int(_cant.apply(lambda r: 0 < _transit_qty.get(r["_up"],0) < r["Gap"],axis=1).sum())
+        _n = _n_full + _n_part
         if _n:
-            st.info(f"🚚 **{_n} open order line(s)** cannot be filled today but have sufficient quantity arriving in an **In Transit PO**.")
+            st.info(f"🚚 **{_n} open order line(s)** have items in an **In Transit PO** — {_n_full} fully covered, {_n_part} partially covered.")
 
     # ── Detail expanders — ordered per spec ──────────────────────────
 
