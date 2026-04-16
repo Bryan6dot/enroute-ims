@@ -464,7 +464,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         oc_fp    = round(oc_ful/oc_total*100,1) if oc_total else 0
         orr_fp   = round(orr_ful/orr_total*100,1) if orr_total else 0
         p100     = round(100-pct_can,1)
-        # Stock sufficient — unit-level breakdown
+        # Stock sufficient — unit-level + location source breakdown
         if inv_view is not None and ord_view is not None and can_combined > 0:
             _fulf_can = check_fulfillability(ord_view, inv_view)
             _can_rows = _fulf_can[_fulf_can["Can_Fulfill"]].copy()
@@ -475,19 +475,45 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
                 _com=("Committed",   "sum"),
             ).reset_index()
             _can_rows = _can_rows.merge(_stock_src, on="SKU", how="left").fillna(0)
-            # Units needed vs covered
-            total_units_needed   = int(_can_rows["Qty_Ordered"].sum())
+            total_units_needed     = int(_can_rows["Qty_Ordered"].sum())
             _can_rows["_used_av"]  = _can_rows[["Qty_Ordered","_av"]].min(axis=1).astype(int)
             _can_rows["_used_inc"] = (_can_rows["Qty_Ordered"] - _can_rows["_used_av"]).clip(lower=0).astype(int)
-            units_from_available = int(_can_rows["_used_av"].sum())
-            units_from_incoming  = int(_can_rows["_used_inc"].sum())
-            total_onhand_in_can  = int(_can_rows["_oh"].sum())
+            units_from_available   = int(_can_rows["_used_av"].sum())
+            units_from_incoming    = int(_can_rows["_used_inc"].sum())
+            total_onhand_in_can    = int(_can_rows["_oh"].sum())
             total_committed_in_can = int(_can_rows["_com"].sum())
-            pct_units_available  = round(units_from_available / total_units_needed * 100, 1) if total_units_needed else 0
+            pct_units_available    = round(units_from_available / total_units_needed * 100, 1) if total_units_needed else 0
+            _sbl = inv_view.groupby(["SKU","Location"])["Available"].sum().reset_index()
+            _sbl = _sbl[_sbl["Available"] > 0]
+            def _find_src(sku, qty):
+                locs = _sbl[_sbl["SKU"]==sku].sort_values("Available", ascending=False)
+                for _, r in locs.iterrows():
+                    if r["Available"] >= qty: return r["Location"]
+                return "Mix: " + " + ".join(locs["Location"].tolist()) if not locs.empty else "Unknown"
+            _can_rows["_qty"] = _can_rows["Qty_Ordered"].astype(float)
+            _can_rows["Source_Loc"] = _can_rows.apply(lambda r: _find_src(r["SKU"], r["_qty"]), axis=1)
+            _loc_counts = _can_rows["Source_Loc"].value_counts().to_dict()
+            _badge_colors = {"Online":"#111","In Store":"#1D9E75","Mix":"#BA7517",
+                             "Reserve Warehouse":"#185FA5","Enroute Richmond":"#533AB7","Reserve Instore":"#993556"}
+            def _bc(loc):
+                for k,v in _badge_colors.items():
+                    if k in loc: return v
+                return "#888"
+            loc_badges_html = "".join(
+                f'<span style="display:inline-flex;align-items:center;gap:4px;background:{_bc(loc)};'
+                f'color:#fff;font-size:11px;font-weight:500;padding:4px 10px;border-radius:20px;">'
+                f'{loc}&nbsp;<strong>{cnt}</strong></span>'
+                for loc, cnt in sorted(_loc_counts.items(), key=lambda x: -x[1])
+            )
+            _now2 = pd.Timestamp.now(tz="UTC")
+            _open2 = ord_view[ord_view["Fulfillment_Status"].isin(["unfulfilled","partial",""])].drop_duplicates("Order_ID").copy()
+            oldest_open_days = round((_now2 - _open2["Created_At"]).dt.total_seconds().div(86400).max(), 1) if not _open2.empty else 0
         else:
             total_units_needed = units_from_available = units_from_incoming = 0
             total_onhand_in_can = total_committed_in_can = 0
             pct_units_available = 0
+            loc_badges_html = ""
+            oldest_open_days = 0
         oc_wt    = oc_wait
         orr_wt   = orr_wait
         cc_pct_with_mov = cc["pct_with_mov"]; cc_pct_no_mov = cc["pct_no_mov"]
@@ -611,27 +637,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_cover:,}</div><div class="fc-sub" style="color:#888;">of {cannot_combined} short</div></div>
   </div>
   <div style="border-top:1px solid #f0f0f0;padding-top:10px;margin-top:2px;">
-    <div style="font-size:10px;color:#888;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Stock sufficient — {can_combined:,} lines · {total_units_needed:,} units needed</div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
-      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">On Hand (SKUs total)</div>
-        <div style="font-size:17px;font-weight:500;">{total_onhand_in_can:,}</div>
-        <div style="font-size:10px;color:#aaa;margin-top:1px;">across fulfillable SKUs</div>
-      </div>
+    <div style="font-size:10px;color:#888;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Stock sufficient — {can_combined:,} lines · {total_units_needed:,} units · oldest open: {oldest_open_days} days</div>
+    <div style="margin-bottom:8px;">
+      <div style="font-size:11px;color:#555;margin-bottom:5px;font-weight:500;">Pick location — where inventory is available</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">{loc_badges_html}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
       <div style="padding:8px 10px;border-radius:6px;background:#f0faf5;">
         <div style="font-size:10px;color:#0F6E56;margin-bottom:3px;">Covered by Available</div>
-        <div style="font-size:17px;font-weight:500;color:#0F6E56;">{units_from_available:,}</div>
-        <div style="font-size:10px;color:#1D9E75;margin-top:1px;">{pct_units_available}% of {total_units_needed:,} units</div>
+        <div style="font-size:17px;font-weight:500;color:#0F6E56;">{units_from_available:,} units</div>
+        <div style="font-size:10px;color:#1D9E75;margin-top:1px;">{pct_units_available}% of {total_units_needed:,} needed</div>
       </div>
       <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">Committed (allocated)</div>
-        <div style="font-size:17px;font-weight:500;">{total_committed_in_can:,}</div>
-        <div style="font-size:10px;color:#aaa;margin-top:1px;">units already assigned</div>
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">Committed (other orders)</div>
+        <div style="font-size:17px;font-weight:500;">{total_committed_in_can:,} units</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">not available for new orders</div>
       </div>
       <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
         <div style="font-size:10px;color:#888;margin-bottom:3px;">Covered by Incoming</div>
-        <div style="font-size:17px;font-weight:500;">{units_from_incoming:,}</div>
-        <div style="font-size:10px;color:#aaa;margin-top:1px;">units need incoming to ship</div>
+        <div style="font-size:17px;font-weight:500;">{units_from_incoming:,} units</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">need Shopify incoming to ship</div>
       </div>
     </div>
   </div>
