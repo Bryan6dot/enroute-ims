@@ -274,16 +274,31 @@ if page == "📊 Dashboard":
     # ── ANIMATED HTML DASHBOARD ────────────────────────────────────────────
 
     def _build_dashboard_html(inv_cc, inv_rr, ord_cc, ord_rr, inv_view, ord_view):
-        def inv_stats(df):
+        def inv_stats(df, ord_df=None):
             if df is None or len(df) == 0:
-                return {"skus":0,"on_hand":0,"stockouts":0,"available":0,"committed":0}
+                return {"skus":0,"on_hand":0,"stockouts":0,"available":0,"committed":0,
+                        "pct_with_mov":0,"pct_no_mov":0,"n_with_mov":0,"n_no_mov":0}
             sku_total = df.groupby("SKU")["On_Hand"].sum()
+            active = sku_total[sku_total > 0].index.tolist()
+            n_active = len(active)
+            # Movement: SKUs that appear in orders
+            if ord_df is not None and n_active:
+                ord_skus = set(ord_df["SKU"].astype(str).str.strip().dropna())
+                ord_skus.discard(""); ord_skus.discard("nan")
+                n_with = len([s for s in active if s in ord_skus])
+                n_no   = n_active - n_with
+            else:
+                n_with = n_no = 0
             return {
-                "skus":      int((sku_total > 0).sum()),
-                "on_hand":   int(df["On_Hand"].sum()),
-                "available": int(df["Available"].sum()),
-                "committed": int(df["Committed"].sum()),
-                "stockouts": int((sku_total == 0).sum()),
+                "skus":        int(n_active),
+                "on_hand":     int(df["On_Hand"].sum()),
+                "available":   int(df["Available"].sum()),
+                "committed":   int(df["Committed"].sum()),
+                "stockouts":   int((sku_total == 0).sum()),
+                "n_with_mov":  n_with,
+                "n_no_mov":    n_no,
+                "pct_with_mov": round(n_with/n_active*100,1) if n_active else 0,
+                "pct_no_mov":   round(n_no/n_active*100,1) if n_active else 0,
             }
 
         def fulf_stats(ord_df, inv_df):
@@ -300,7 +315,7 @@ if page == "📊 Dashboard":
             paid = ord_df[ord_df["Financial_Status"]=="paid"].drop_duplicates("Order_ID")
             return int(paid["Total"].sum())
 
-        cc  = inv_stats(inv_cc); rr  = inv_stats(inv_rr)
+        cc  = inv_stats(inv_cc, ord_cc); rr  = inv_stats(inv_rr, ord_rr)
         fc_cc = fulf_stats(ord_cc, inv_cc); fc_rr = fulf_stats(ord_rr, inv_rr)
         oc    = orders_summary(ord_cc) if ord_cc is not None else {}
         orr_s = orders_summary(ord_rr) if ord_rr is not None else {}
@@ -451,6 +466,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         p100     = round(100-pct_can,1)
         oc_wt    = oc_wait
         orr_wt   = orr_wait
+        cc_pct_with_mov = cc["pct_with_mov"]; cc_pct_no_mov = cc["pct_no_mov"]
+        cc_n_with_mov   = cc["n_with_mov"];   cc_n_no_mov   = cc["n_no_mov"]
+        rr_pct_with_mov = rr["pct_with_mov"]; rr_pct_no_mov = rr["pct_no_mov"]
+        rr_n_with_mov   = rr["n_with_mov"];   rr_n_no_mov   = rr["n_no_mov"]
+        def pct_sub24(ord_df):
+            if ord_df is None: return 0.0
+            done = ord_df[(ord_df["Fulfillment_Status"]=="fulfilled") & ord_df["Fulfilled_At"].notna() & ord_df["Created_At"].notna()].copy()
+            done["hrs"] = (done["Fulfilled_At"] - done["Created_At"]).dt.total_seconds() / 3600
+            done = done[done["hrs"] >= 0]
+            return round((done["hrs"] < 24).sum() / len(done) * 100, 1) if len(done) else 0.0
+        oc_sub24  = pct_sub24(ord_cc)
+        orr_sub24 = pct_sub24(ord_rr)
 
         return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>{css}</style></head><body>
 <div class="dash">
@@ -462,6 +489,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="kpi-box"><div class="kpi-lbl">SKUs w/ stock</div><div class="kpi-val">{cc_sk:,}</div></div>
     <div class="kpi-box"><div class="kpi-lbl">On Hand</div><div class="kpi-val">{cc_oh:,}</div></div>
     <div class="kpi-box"><div class="kpi-lbl">Stockouts</div><div class="kpi-val" style="color:#E24B4A;">{cc_so:,}</div></div>
+  </div>
+  <div style="display:flex;gap:6px;margin-bottom:10px;">
+    <div style="flex:1;background:#f5f5f5;border-radius:6px;padding:7px 10px;">
+      <div style="font-size:10px;color:#888;margin-bottom:2px;">With movement</div>
+      <div style="font-size:16px;font-weight:500;color:#1D9E75;">{cc_pct_with_mov}%</div>
+      <div style="font-size:10px;color:#888;">{cc_n_with_mov:,} SKUs</div>
+    </div>
+    <div style="flex:1;background:#f5f5f5;border-radius:6px;padding:7px 10px;">
+      <div style="font-size:10px;color:#888;margin-bottom:2px;">No movement</div>
+      <div style="font-size:16px;font-weight:500;color:#E24B4A;">{cc_pct_no_mov}%</div>
+      <div style="font-size:10px;color:#888;">{cc_n_no_mov:,} SKUs</div>
+    </div>
   </div>
   <div class="pie-lbl-txt">Fulfillability — open orders</div>
   <div class="pie-section">
@@ -479,6 +518,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="kpi-box"><div class="kpi-lbl">SKUs w/ stock</div><div class="kpi-val">{rr_sk:,}</div></div>
     <div class="kpi-box"><div class="kpi-lbl">On Hand</div><div class="kpi-val">{rr_oh:,}</div></div>
     <div class="kpi-box"><div class="kpi-lbl">Stockouts</div><div class="kpi-val" style="color:#E24B4A;">{rr_so:,}</div></div>
+  </div>
+  <div style="display:flex;gap:6px;margin-bottom:10px;">
+    <div style="flex:1;background:#f5f5f5;border-radius:6px;padding:7px 10px;">
+      <div style="font-size:10px;color:#888;margin-bottom:2px;">With movement</div>
+      <div style="font-size:16px;font-weight:500;color:#1D9E75;">{rr_pct_with_mov}%</div>
+      <div style="font-size:10px;color:#888;">{rr_n_with_mov:,} SKUs</div>
+    </div>
+    <div style="flex:1;background:#f5f5f5;border-radius:6px;padding:7px 10px;">
+      <div style="font-size:10px;color:#888;margin-bottom:2px;">No movement</div>
+      <div style="font-size:16px;font-weight:500;color:#E24B4A;">{rr_pct_no_mov}%</div>
+      <div style="font-size:10px;color:#888;">{rr_n_no_mov:,} SKUs</div>
+    </div>
   </div>
   <div class="pie-lbl-txt">Fulfillability — open orders</div>
   <div class="pie-section">
@@ -508,8 +559,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="kpi-box"><div class="kpi-lbl">Unfulfilled</div><div class="kpi-val" style="color:#E24B4A;">{oc_unf:,}</div></div>
   </div>
   <div class="proc-row">
-    <div><div class="p-lbl">Avg</div><div class="p-val">{oc_avg} hrs</div></div>
-    <div><div class="p-lbl">Fastest</div><div class="p-val">{oc_min} hrs</div></div>
+    <div><div class="p-lbl">Avg fulfillment</div><div class="p-val">{oc_avg} hrs</div></div>
+    <div><div class="p-lbl">Filled &lt;24 hrs</div><div class="p-val" style="color:#1D9E75;">{oc_sub24}%</div></div>
     <div><div class="p-lbl">Avg wait (open)</div><div class="p-val" style="color:#E24B4A;">{oc_wt} days</div></div>
   </div>
 </div>
@@ -521,8 +572,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="kpi-box"><div class="kpi-lbl">Unfulfilled</div><div class="kpi-val" style="color:#E24B4A;">{orr_unf:,}</div></div>
   </div>
   <div class="proc-row">
-    <div><div class="p-lbl">Avg</div><div class="p-val">{orr_avg} hrs</div></div>
-    <div><div class="p-lbl">Fastest</div><div class="p-val">{orr_min} hrs</div></div>
+    <div><div class="p-lbl">Avg fulfillment</div><div class="p-val">{orr_avg} hrs</div></div>
+    <div><div class="p-lbl">Filled &lt;24 hrs</div><div class="p-val" style="color:#1D9E75;">{orr_sub24}%</div></div>
     <div><div class="p-lbl">Avg wait (open)</div><div class="p-val" style="color:#E24B4A;">{orr_wt} days</div></div>
   </div>
 </div>
@@ -534,30 +585,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="fc-box"><div class="fc-lbl">Stock sufficient</div><div class="fc-val" style="color:#1D9E75;">{can_combined:,}</div><div class="fc-sub" style="color:#1D9E75;">{pct_can}%</div></div>
     <div class="fc-box"><div class="fc-lbl">Stock short</div><div class="fc-val" style="color:#E24B4A;">{cannot_combined:,}</div><div class="fc-sub" style="color:#E24B4A;">{p100}%</div></div>
     <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_cover:,}</div><div class="fc-sub" style="color:#888;">of {cannot_combined} short</div></div>
-  </div>
-  <div class="divider"></div>
-  <div style="display:flex;align-items:center;gap:16px;justify-content:center;padding:8px 0 4px;">
-    <div style="position:relative;width:100px;height:100px;flex-shrink:0;">
-      <canvas id="pieFulfill" width="100" height="100"></canvas>
-      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;">{can_combined:,}<br><span style=\"font-size:10px;font-weight:400;color:#888;\">can fulfill</span></div>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:8px;">
-      <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
-        <div style="width:9px;height:9px;border-radius:50%;background:#1D9E75;flex-shrink:0;"></div>
-        <span style="color:#888;">Can fulfill today</span>
-        <span style="margin-left:auto;font-weight:500;padding-left:16px;">{can_combined:,} ({pct_can}%)</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
-        <div style="width:9px;height:9px;border-radius:50%;background:#E24B4A;flex-shrink:0;"></div>
-        <span style="color:#888;">Stock short</span>
-        <span style="margin-left:auto;font-weight:500;padding-left:16px;">{cannot_combined:,} ({p100}%)</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
-        <div style="width:9px;height:9px;border-radius:50%;background:#aaa;flex-shrink:0;"></div>
-        <span style="color:#888;">In transit cover</span>
-        <span style="margin-left:auto;font-weight:500;padding-left:16px;">{n_transit_cover:,}</span>
-      </div>
-    </div>
   </div>
 </div>
 </div>
@@ -578,7 +605,6 @@ function drawDonut(id,pct,fill,bg,sz){{
 }}
 drawDonut('pieCC',{cc_pct_v},isDark?'#ddd':'#111',bg);
 drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
-drawDonut('pieFulfill',{pct_can},'#1D9E75',isDark?'#E24B4A':'#E24B4A',100);
 </script></body></html>"""
 
     # ── Render HTML dashboard ─────────────────────────────────────────
@@ -686,6 +712,51 @@ drawDonut('pieFulfill',{pct_can},'#1D9E75',isDark?'#E24B4A':'#E24B4A',100);
             order_level["Created_At"]   = order_level["Created_At"].dt.strftime("%Y-%m-%d %H:%M")
             order_level["Fulfilled_At"] = order_level["Fulfilled_At"].dt.strftime("%Y-%m-%d %H:%M")
             st.dataframe(order_level, use_container_width=True, hide_index=True)
+
+    # ── Inventory movement detail ─────────────────────────────────────
+    if inv_view is not None and ord_view is not None:
+        st.markdown("---")
+        st.caption("Inventory movement analysis — based on orders in current export period")
+
+        ord_skus_set = set(ord_view["SKU"].astype(str).str.strip().dropna())
+        ord_skus_set.discard(""); ord_skus_set.discard("nan")
+
+        inv_active = inv_view.copy()
+        sku_oh = inv_active.groupby("SKU")["On_Hand"].sum()
+        active_skus = sku_oh[sku_oh > 0].index
+
+        inv_active = inv_active[inv_active["SKU"].isin(active_skus)]
+        inv_summary = inv_active.groupby(["SKU","Title"]).agg(
+            On_Hand   =("On_Hand",   "sum"),
+            Available =("Available", "sum"),
+            Committed =("Committed", "sum"),
+            Incoming  =("Incoming",  "sum"),
+        ).reset_index()
+
+        inv_summary["Movement"] = inv_summary["SKU"].apply(
+            lambda s: "With movement" if s in ord_skus_set else "No movement"
+        )
+
+        with_mov = inv_summary[inv_summary["Movement"] == "With movement"].sort_values("On_Hand", ascending=False)
+        no_mov   = inv_summary[inv_summary["Movement"] == "No movement"].sort_values("On_Hand", ascending=False)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            with st.expander(f"✅ {len(with_mov):,} SKUs with movement — {int(with_mov['On_Hand'].sum()):,} units on hand"):
+                st.caption("SKUs that appear in at least one order in the current export")
+                st.dataframe(
+                    with_mov[["SKU","Title","On_Hand","Available","Committed","Incoming"]]
+                    .rename(columns={"On_Hand":"On Hand"}),
+                    use_container_width=True, hide_index=True,
+                )
+        with c2:
+            with st.expander(f"⚠️ {len(no_mov):,} SKUs with no movement — {int(no_mov['On_Hand'].sum()):,} units on hand"):
+                st.caption("Active stock (On Hand > 0) with no sales in the current export period")
+                st.dataframe(
+                    no_mov[["SKU","Title","On_Hand","Available","Committed","Incoming"]]
+                    .rename(columns={"On_Hand":"On Hand"}),
+                    use_container_width=True, hide_index=True,
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
