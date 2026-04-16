@@ -463,13 +463,29 @@ elif page == "📦 Inventory Control":
         else:
             st.markdown("#### Shopify Inventory — Detail by Location, grouped by Product")
 
-            loc_df, grand_total = _loc_stats(inv_view)
+            # Store filter for Inventory Control
+            _ic_store_opts = {"All Stores": None}
+            _ic_store_opts.update({
+                {"CC": "🚴 Cycling (CC)", "RR": "🏃 Running (RR)"}.get(s, s): s
+                for s in st.session_state.inv_store.keys()
+            })
+            if len(st.session_state.inv_store) > 1:
+                _ic_sel_label = st.selectbox("Store", list(_ic_store_opts.keys()), key="ic_store")
+                _ic_store = _ic_store_opts[_ic_sel_label]
+            else:
+                _ic_store = next(iter(st.session_state.inv_store), None)
+
+            ic_inv = (inv_df[inv_df["Store"] == _ic_store].copy()
+                      if _ic_store and "Store" in inv_df.columns
+                      else inv_df.copy())
+
+            loc_df, grand_total = _loc_stats(ic_inv)
             active_locs = loc_df["Location"].tolist()
             selected_loc = st.selectbox("Location", ["All Locations"] + active_locs)
 
             filtered = (
-                inv_df.copy() if selected_loc == "All Locations"
-                else inv_df[inv_df["Location"] == selected_loc].copy()
+                ic_inv.copy() if selected_loc == "All Locations"
+                else ic_inv[ic_inv["Location"] == selected_loc].copy()
             )
 
             # Group by Title
@@ -527,8 +543,8 @@ elif page == "📦 Inventory Control":
             title_list = has_stock["Title"].tolist()
             if title_list:
                 sel_title = st.selectbox("Select product", title_list)
-                variant_df = inv_df[inv_df["Title"] == sel_title] if selected_loc == "All Locations" \
-                    else inv_df[(inv_df["Title"] == sel_title) & (inv_df["Location"] == selected_loc)]
+                variant_df = ic_inv[ic_inv["Title"] == sel_title] if selected_loc == "All Locations" \
+                    else ic_inv[(ic_inv["Title"] == sel_title) & (ic_inv["Location"] == selected_loc)]
 
                 show_cols = [
                     "SKU",
