@@ -464,23 +464,30 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         oc_fp    = round(oc_ful/oc_total*100,1) if oc_total else 0
         orr_fp   = round(orr_ful/orr_total*100,1) if orr_total else 0
         p100     = round(100-pct_can,1)
-        # Stock sufficient source breakdown
+        # Stock sufficient — unit-level breakdown
         if inv_view is not None and ord_view is not None and can_combined > 0:
             _fulf_can = check_fulfillability(ord_view, inv_view)
             _can_rows = _fulf_can[_fulf_can["Can_Fulfill"]].copy()
             _stock_src = inv_view.groupby("SKU").agg(
-                _av=("Available","sum"), _inc=("Incoming","sum"), _oh=("On_Hand","sum")
+                _av =("Available",   "sum"),
+                _inc=("Incoming",    "sum"),
+                _oh =("On_Hand",     "sum"),
+                _com=("Committed",   "sum"),
             ).reset_index()
             _can_rows = _can_rows.merge(_stock_src, on="SKU", how="left").fillna(0)
-            can_from_available  = int((_can_rows["_av"] >= _can_rows["Qty_Ordered"]).sum())
-            can_from_incoming   = int(can_combined - can_from_available)
-            total_available_in_can = int(_can_rows["_av"].sum())
-            total_onhand_in_can    = int(_can_rows["_oh"].sum())
-            pct_from_available  = round(can_from_available / can_combined * 100, 1)
+            # Units needed vs covered
+            total_units_needed   = int(_can_rows["Qty_Ordered"].sum())
+            _can_rows["_used_av"]  = _can_rows[["Qty_Ordered","_av"]].min(axis=1).astype(int)
+            _can_rows["_used_inc"] = (_can_rows["Qty_Ordered"] - _can_rows["_used_av"]).clip(lower=0).astype(int)
+            units_from_available = int(_can_rows["_used_av"].sum())
+            units_from_incoming  = int(_can_rows["_used_inc"].sum())
+            total_onhand_in_can  = int(_can_rows["_oh"].sum())
+            total_committed_in_can = int(_can_rows["_com"].sum())
+            pct_units_available  = round(units_from_available / total_units_needed * 100, 1) if total_units_needed else 0
         else:
-            can_from_available = can_from_incoming = 0
-            total_available_in_can = total_onhand_in_can = 0
-            pct_from_available = 0
+            total_units_needed = units_from_available = units_from_incoming = 0
+            total_onhand_in_can = total_committed_in_can = 0
+            pct_units_available = 0
         oc_wt    = oc_wait
         orr_wt   = orr_wait
         cc_pct_with_mov = cc["pct_with_mov"]; cc_pct_no_mov = cc["pct_no_mov"]
@@ -604,27 +611,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_cover:,}</div><div class="fc-sub" style="color:#888;">of {cannot_combined} short</div></div>
   </div>
   <div style="border-top:1px solid #f0f0f0;padding-top:10px;margin-top:2px;">
-    <div style="font-size:10px;color:#888;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Stock sufficient — source breakdown</div>
+    <div style="font-size:10px;color:#888;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Stock sufficient — {can_combined:,} lines · {total_units_needed:,} units needed</div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
-      <div style="padding:8px 10px;border-radius:6px;background:#f0faf5;">
-        <div style="font-size:10px;color:#0F6E56;margin-bottom:3px;">From Available</div>
-        <div style="font-size:17px;font-weight:500;color:#0F6E56;">{can_from_available:,}</div>
-        <div style="font-size:10px;color:#1D9E75;margin-top:1px;">{pct_from_available}% of sufficient</div>
-      </div>
       <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">Available units total</div>
-        <div style="font-size:17px;font-weight:500;">{total_available_in_can:,}</div>
-        <div style="font-size:10px;color:#aaa;margin-top:1px;">across fulfillable lines</div>
-      </div>
-      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">Incoming covers</div>
-        <div style="font-size:17px;font-weight:500;">{can_from_incoming:,}</div>
-        <div style="font-size:10px;color:#aaa;margin-top:1px;">lines need incoming stock</div>
-      </div>
-      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">On Hand total</div>
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">On Hand (SKUs total)</div>
         <div style="font-size:17px;font-weight:500;">{total_onhand_in_can:,}</div>
-        <div style="font-size:10px;color:#aaa;margin-top:1px;">units behind these orders</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">across fulfillable SKUs</div>
+      </div>
+      <div style="padding:8px 10px;border-radius:6px;background:#f0faf5;">
+        <div style="font-size:10px;color:#0F6E56;margin-bottom:3px;">Covered by Available</div>
+        <div style="font-size:17px;font-weight:500;color:#0F6E56;">{units_from_available:,}</div>
+        <div style="font-size:10px;color:#1D9E75;margin-top:1px;">{pct_units_available}% of {total_units_needed:,} units</div>
+      </div>
+      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">Committed (allocated)</div>
+        <div style="font-size:17px;font-weight:500;">{total_committed_in_can:,}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">units already assigned</div>
+      </div>
+      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
+        <div style="font-size:10px;color:#888;margin-bottom:3px;">Covered by Incoming</div>
+        <div style="font-size:17px;font-weight:500;">{units_from_incoming:,}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:1px;">units need incoming to ship</div>
       </div>
     </div>
   </div>
@@ -735,14 +742,31 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
         with c1:
             avg_can = round(_can_df["Days Open"].mean(), 1) if not _can_df.empty else 0
             with st.expander(f"✅ {len(_can_df)} lines ready to ship — avg {avg_can} days open"):
-                st.dataframe(
-                    _can_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
-                              "Available_Stock","Financial_Status","Days Open"]]
-                    .rename(columns={"Order_ID":"Order","Item_Name":"Item",
-                                     "Qty_Ordered":"Qty","Available_Stock":"In Stock",
-                                     "Financial_Status":"Status"}),
-                    use_container_width=True, hide_index=True,
-                )
+                # Add location source column
+                if not _can_df.empty:
+                    try:
+                        _sbl2 = inv_view.groupby(["SKU","Location"])["Available"].sum().reset_index()
+                        _sbl2 = _sbl2[_sbl2["Available"] > 0]
+                        def _fs2(sku, qty):
+                            locs = _sbl2[_sbl2["SKU"]==sku].sort_values("Available", ascending=False)
+                            for _, r in locs.iterrows():
+                                if r["Available"] >= qty: return r["Location"]
+                            return "Mix: " + " + ".join(locs["Location"].tolist()) if not locs.empty else "—"
+                        _can_show = _can_df.copy()
+                        _can_show["Pick From"] = _can_show.apply(
+                            lambda r: _fs2(r["SKU"], float(r["Qty_Ordered"])), axis=1
+                        )
+                    except Exception:
+                        _can_show = _can_df.copy()
+                        _can_show["Pick From"] = "—"
+                    st.dataframe(
+                        _can_show[["Order_ID","SKU","Item_Name","Qty_Ordered","Pick From",
+                                   "Available_Stock","Financial_Status","Days Open"]]
+                        .rename(columns={"Order_ID":"Order","Item_Name":"Item",
+                                         "Qty_Ordered":"Qty","Available_Stock":"In Stock",
+                                         "Financial_Status":"Status"}),
+                        use_container_width=True, hide_index=True,
+                    )
         with c2:
             avg_cant = round(_cant_df["Days Open"].mean(), 1) if not _cant_df.empty else 0
             with st.expander(f"❌ {len(_cant_df)} lines stock short — avg {avg_cant} days open"):
