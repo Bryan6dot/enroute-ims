@@ -43,9 +43,11 @@ _defaults = {
     "page":         "📊 Dashboard",
     "pos":          [],
     "po_items":     [{"SKU": "", "Description": "", "Qty": 1}],
-    "inv_df":       None,
-    "ord_df":       None,
-    "po_published": None,   # stores last published PO id for confirmation banner
+    "inv_df":       None,   # combined inventory (all stores)
+    "ord_df":       None,   # combined orders (all stores)
+    "inv_store":    {},     # {"CC": df, "RR": df} — per-store raw
+    "ord_store":    {},     # {"CC": df, "RR": df} — per-store raw
+    "po_published": None,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -95,17 +97,16 @@ with st.sidebar:
 
     st.divider()
     st.caption("**Data loaded**")
-    if st.session_state.inv_df is not None:
-        n = len(st.session_state.inv_df)
-        s = st.session_state.inv_df["SKU"].nunique()
-        st.success(f"✅ Inventory\n{n:,} rows · {s:,} SKUs")
-    else:
-        st.warning("⚠️ No inventory file")
-    if st.session_state.ord_df is not None:
-        o = st.session_state.ord_df["Order_ID"].nunique()
-        st.success(f"✅ Orders\n{o:,} orders")
-    else:
-        st.warning("⚠️ No orders file")
+    STORES = {"CC": "🚴 Cycling", "RR": "🏃 Running"}
+    for store_code, store_label in STORES.items():
+        inv_loaded = store_code in st.session_state.inv_store
+        ord_loaded = store_code in st.session_state.ord_store
+        inv_icon = "✅" if inv_loaded else "⚪"
+        ord_icon = "✅" if ord_loaded else "⚪"
+        st.caption(
+            f"**{store_label}** ({store_code})  \n"
+            f"{inv_icon} Inventory · {ord_icon} Orders"
+        )
 
 page = st.session_state.page
 
@@ -160,43 +161,85 @@ if page == "📊 Dashboard":
         st.stop()
 
     # ── File upload ────────────────────────────────────────────────────────
-    with st.expander(
-        "📂 Upload Shopify Export Files",
-        expanded=(st.session_state.inv_df is None and st.session_state.ord_df is None)
-    ):
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**Inventory Export**")
-            st.caption("Admin → Products → Inventory → Export")
-            inv_file = st.file_uploader("inv", type=["csv"], key="inv_upload",
-                                        label_visibility="collapsed")
-            if inv_file:
-                try:
-                    df = parse_inventory(inv_file)
-                    warns = validate_inventory_file(df)
-                    for w in warns:
-                        st.warning(w)
-                    if not warns:
-                        st.session_state.inv_df = df
-                        st.success(f"✅ {len(df):,} rows · {df['SKU'].nunique():,} SKUs")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-        with c2:
-            st.markdown("**Orders Export**")
-            st.caption("Admin → Orders → Export")
-            ord_file = st.file_uploader("ord", type=["csv"], key="ord_upload",
-                                        label_visibility="collapsed")
-            if ord_file:
-                try:
-                    df = parse_orders(ord_file)
-                    warns = validate_orders_file(df)
-                    for w in warns:
-                        st.warning(w)
-                    if not warns:
-                        st.session_state.ord_df = df
-                        st.success(f"✅ {df['Order_ID'].nunique():,} orders loaded")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+    no_data = not st.session_state.inv_store and not st.session_state.ord_store
+    with st.expander("📂 Upload Shopify Export Files", expanded=no_data):
+
+        def _rebuild_combined():
+            """Merge per-store DFs → combined inv_df / ord_df with Store column."""
+            if st.session_state.inv_store:
+                frames = [df.copy().assign(Store=code)
+                          for code, df in st.session_state.inv_store.items()]
+                st.session_state.inv_df = pd.concat(frames, ignore_index=True)
+            else:
+                st.session_state.inv_df = None
+            if st.session_state.ord_store:
+                frames = [df.copy().assign(Store=code)
+                          for code, df in st.session_state.ord_store.items()]
+                st.session_state.ord_df = pd.concat(frames, ignore_index=True)
+            else:
+                st.session_state.ord_df = None
+
+        STORE_DEFS = [("CC", "🚴 Cycling Store"), ("RR", "🏃 Running Store")]
+
+        for store_code, store_label in STORE_DEFS:
+            st.markdown(f"**{store_label} ({store_code})**")
+            c1, c2, c3 = st.columns([5, 5, 1])
+
+            with c1:
+                st.caption("Inventory Export — Admin → Products → Inventory → Export")
+                inv_file = st.file_uploader(
+                    f"inv_{store_code}", type=["csv"],
+                    key=f"inv_upload_{store_code}", label_visibility="collapsed"
+                )
+                if inv_file:
+                    try:
+                        df = parse_inventory(inv_file)
+                        warns = validate_inventory_file(df)
+                        for w in warns: st.warning(w)
+                        if not warns:
+                            st.session_state.inv_store[store_code] = df
+                            _rebuild_combined()
+                            st.success(f"✅ {df['SKU'].nunique():,} SKUs")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                elif store_code in st.session_state.inv_store:
+                    n = st.session_state.inv_store[store_code]["SKU"].nunique()
+                    st.success(f"✅ Loaded — {n:,} SKUs")
+
+            with c2:
+                st.caption("Orders Export — Admin → Orders → Export")
+                ord_file = st.file_uploader(
+                    f"ord_{store_code}", type=["csv"],
+                    key=f"ord_upload_{store_code}", label_visibility="collapsed"
+                )
+                if ord_file:
+                    try:
+                        df = parse_orders(ord_file)
+                        warns = validate_orders_file(df)
+                        for w in warns: st.warning(w)
+                        if not warns:
+                            st.session_state.ord_store[store_code] = df
+                            _rebuild_combined()
+                            st.success(f"✅ {df['Order_ID'].nunique():,} orders")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                elif store_code in st.session_state.ord_store:
+                    o = st.session_state.ord_store[store_code]["Order_ID"].nunique()
+                    st.success(f"✅ Loaded — {o:,} orders")
+
+            with c3:
+                st.caption(" ")
+                has_data = (store_code in st.session_state.inv_store
+                            or store_code in st.session_state.ord_store)
+                if st.button("🗑", key=f"clear_{store_code}",
+                             help=f"Clear {store_code} data",
+                             disabled=not has_data):
+                    st.session_state.inv_store.pop(store_code, None)
+                    st.session_state.ord_store.pop(store_code, None)
+                    _rebuild_combined()
+                    st.rerun()
+
+            st.divider()
 
     inv_df = st.session_state.inv_df
     ord_df = st.session_state.ord_df
@@ -205,8 +248,30 @@ if page == "📊 Dashboard":
         st.info("Upload at least one file above to see the dashboard.")
         st.stop()
 
+    # Store filter — shown when both stores have data
+    loaded_stores = list(st.session_state.inv_store.keys() or st.session_state.ord_store.keys())
+    STORE_LABELS  = {"CC": "🚴 Cycling (CC)", "RR": "🏃 Running (RR)"}
+    store_options = ["All Stores"] + [STORE_LABELS.get(s, s) for s in loaded_stores]
+    store_code_map = {STORE_LABELS.get(s, s): s for s in loaded_stores}
+
+    if len(loaded_stores) > 1:
+        sel_store_label = st.selectbox("📍 View store", store_options, key="dash_store_filter")
+        sel_store = store_code_map.get(sel_store_label)  # None = All
+    else:
+        sel_store = loaded_stores[0] if loaded_stores else None
+        sel_store_label = STORE_LABELS.get(sel_store, "All Stores")
+
+    # Apply store filter to working dataframes
+    def _filter_store(df, store_code):
+        if df is None or store_code is None:
+            return df
+        return df[df["Store"] == store_code].copy() if "Store" in df.columns else df
+
+    inv_view = _filter_store(inv_df, sel_store) if sel_store else inv_df
+    ord_view = _filter_store(ord_df, sel_store) if sel_store else ord_df
+
     # ── SECTION 1: INVENTORY BY LOCATION ──────────────────────────────────
-    if inv_df is not None:
+    if inv_view is not None:
         st.markdown("---")
         st.markdown("### 📦 Shopify Inventory — Stock by Location")
         st.caption(
@@ -214,7 +279,7 @@ if page == "📊 Dashboard":
             "Physical warehouse count not yet uploaded — discrepancy comparison not available."
         )
 
-        loc_df, grand_total = _loc_stats(inv_df)
+        loc_df, grand_total = _loc_stats(inv_view)
 
         # One KPI card per active location
         cols = st.columns(len(loc_df))
@@ -250,11 +315,11 @@ if page == "📊 Dashboard":
         )
 
     # ── SECTION 2: ORDERS ─────────────────────────────────────────────────
-    if ord_df is not None:
+    if ord_view is not None:
         st.markdown("---")
         st.markdown("### 🚚 Orders")
 
-        summary = orders_summary(ord_df)
+        summary = orders_summary(ord_view)
         total   = summary["total_orders"]
 
         c1, c2, c3, c4 = st.columns(4)
@@ -277,8 +342,8 @@ if page == "📊 Dashboard":
                 _k = _s["sku"].strip().upper()
                 _transit_qty[_k] = _transit_qty.get(_k, 0) + int(_s.get("qty", 0))
 
-        if _transit_qty and inv_df is not None:
-            _fulf_preview = check_fulfillability(ord_df, inv_df)
+        if _transit_qty and inv_view is not None:
+            _fulf_preview = check_fulfillability(ord_view, inv_view)
             _cant         = _fulf_preview[~_fulf_preview["Can_Fulfill"]].copy()
             _cant["_up"]  = _cant["SKU"].astype(str).str.strip().str.upper()
             # Covered = transit qty >= gap needed
@@ -302,12 +367,12 @@ if page == "📊 Dashboard":
             f"{summary['refunded']} / {summary['cancelled']}")
 
         # Fulfillability — only when both files are present
-        if inv_df is not None:
+        if inv_view is not None:
             st.markdown("---")
             st.markdown("### 🎯 Can We Fulfill Open Orders?")
             st.caption("Checks Shopify available stock against each open order line item")
 
-            fulf        = check_fulfillability(ord_df, inv_df)
+            fulf        = check_fulfillability(ord_view, inv_view)
             total_lines = len(fulf)
             can         = int(fulf["Can_Fulfill"].sum())
             cannot      = total_lines - can
@@ -371,7 +436,7 @@ if page == "📊 Dashboard":
                     )
 
         with st.expander("📋 All orders"):
-            order_level = ord_df.drop_duplicates("Order_ID")[[
+            order_level = ord_view.drop_duplicates("Order_ID")[[
                 "Order_ID","Financial_Status","Fulfillment_Status",
                 "Created_At","Fulfilled_At","Subtotal","Total",
                 "Shipping_Method","Vendor",
@@ -398,7 +463,7 @@ elif page == "📦 Inventory Control":
         else:
             st.markdown("#### Shopify Inventory — Detail by Location, grouped by Product")
 
-            loc_df, grand_total = _loc_stats(inv_df)
+            loc_df, grand_total = _loc_stats(inv_view)
             active_locs = loc_df["Location"].tolist()
             selected_loc = st.selectbox("Location", ["All Locations"] + active_locs)
 
