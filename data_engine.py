@@ -280,12 +280,12 @@ def check_fulfillability(ord_df: pd.DataFrame, inv_df: pd.DataFrame) -> pd.DataF
     """
     For each OPEN (unfulfilled / partial) order line item, check whether
     the available inventory is sufficient to fulfill it.
+    Includes Incoming stock (Shopify internal transfers) in the available count.
 
     Returns a DataFrame with columns:
         Order_ID, SKU, Item_Name, Qty_Ordered,
-        Available_Stock, Can_Fulfill, Gap
+        Available_Stock, Incoming_Stock, Can_Fulfill, Gap
     """
-    # Only open lines
     open_lines = ord_df[
         ord_df["Fulfillment_Status"].isin(["unfulfilled", "partial", ""])
     ][["Order_ID","SKU","Item_Name","Qty_Ordered","Financial_Status"]].copy()
@@ -293,14 +293,18 @@ def check_fulfillability(ord_df: pd.DataFrame, inv_df: pd.DataFrame) -> pd.DataF
     open_lines["SKU"] = open_lines["SKU"].astype(str).str.strip()
     open_lines = open_lines[open_lines["SKU"].ne("") & open_lines["SKU"].ne("nan") & open_lines["SKU"].notna()]
 
-    # Consolidated available per SKU
-    stock = inv_df.groupby("SKU")["Available"].sum().reset_index()
-    stock.columns = ["SKU", "Available_Stock"]
+    # Consolidated available + incoming per SKU
+    stock = inv_df.groupby("SKU").agg(
+        Available_Stock=("Available","sum"),
+        Incoming_Stock =("Incoming", "sum"),
+    ).reset_index()
 
     merged = open_lines.merge(stock, on="SKU", how="left")
     merged["Available_Stock"] = merged["Available_Stock"].fillna(0).astype(int)
-    merged["Can_Fulfill"]     = merged["Available_Stock"] >= merged["Qty_Ordered"]
-    merged["Gap"]             = (merged["Qty_Ordered"] - merged["Available_Stock"]).clip(lower=0).astype(int)
+    merged["Incoming_Stock"]  = merged["Incoming_Stock"].fillna(0).astype(int)
+    merged["Effective_Stock"] = merged["Available_Stock"] + merged["Incoming_Stock"]
+    merged["Can_Fulfill"]     = merged["Effective_Stock"] >= merged["Qty_Ordered"]
+    merged["Gap"]             = (merged["Qty_Ordered"] - merged["Effective_Stock"]).clip(lower=0).astype(int)
 
     return merged.sort_values("Can_Fulfill").reset_index(drop=True)
 
