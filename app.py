@@ -304,7 +304,8 @@ if page == "📊 Dashboard":
         fc_cc = fulf_stats(ord_cc, inv_cc); fc_rr = fulf_stats(ord_rr, inv_rr)
         oc    = orders_summary(ord_cc) if ord_cc is not None else {}
         orr_s = orders_summary(ord_rr) if ord_rr is not None else {}
-        rev_cc = rev(ord_cc); rev_rr = rev(ord_rr)
+        oc_wait = (lambda d: round((pd.Timestamp.now(tz='UTC') - d[d['Fulfillment_Status'].isin(['unfulfilled','partial'])].drop_duplicates('Order_ID')['Created_At']).dt.total_seconds().div(3600).div(24).mean(), 1) if d is not None and not d[d['Fulfillment_Status'].isin(['unfulfilled','partial'])].empty else 0.0)(ord_cc)
+        orr_wait = (lambda d: round((pd.Timestamp.now(tz='UTC') - d[d['Fulfillment_Status'].isin(['unfulfilled','partial'])].drop_duplicates('Order_ID')['Created_At']).dt.total_seconds().div(3600).div(24).mean(), 1) if d is not None and not d[d['Fulfillment_Status'].isin(['unfulfilled','partial'])].empty else 0.0)(ord_rr)
         oc_total  = oc.get("total_orders",0)
         orr_total = orr_s.get("total_orders",0)
 
@@ -448,6 +449,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         oc_fp    = round(oc_ful/oc_total*100,1) if oc_total else 0
         orr_fp   = round(orr_ful/orr_total*100,1) if orr_total else 0
         p100     = round(100-pct_can,1)
+        oc_wt    = oc_wait
+        orr_wt   = orr_wait
 
         return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>{css}</style></head><body>
 <div class="dash">
@@ -507,9 +510,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div class="proc-row">
     <div><div class="p-lbl">Avg</div><div class="p-val">{oc_avg} hrs</div></div>
     <div><div class="p-lbl">Fastest</div><div class="p-val">{oc_min} hrs</div></div>
-    <div><div class="p-lbl">Slowest</div><div class="p-val" style="color:#E24B4A;">{oc_max} hrs</div></div>
+    <div><div class="p-lbl">Avg wait (open)</div><div class="p-val" style="color:#E24B4A;">{oc_wt} days</div></div>
   </div>
-  <div class="rev">Revenue: <span>${rev_cc:,} CAD</span></div>
 </div>
 <div class="order-card">
   <div class="store-hdr"><span class="badge badge-rr">RR</span><span class="store-name">Running orders</span></div>
@@ -521,9 +523,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div class="proc-row">
     <div><div class="p-lbl">Avg</div><div class="p-val">{orr_avg} hrs</div></div>
     <div><div class="p-lbl">Fastest</div><div class="p-val">{orr_min} hrs</div></div>
-    <div><div class="p-lbl">Slowest</div><div class="p-val" style="color:#E24B4A;">{orr_max} hrs</div></div>
+    <div><div class="p-lbl">Avg wait (open)</div><div class="p-val" style="color:#E24B4A;">{orr_wt} days</div></div>
   </div>
-  <div class="rev">Revenue: <span>${rev_rr:,} CAD</span></div>
 </div>
 </div>
 <div class="fulfill-section">
@@ -535,24 +536,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_cover:,}</div><div class="fc-sub" style="color:#888;">of {cannot_combined} short</div></div>
   </div>
   <div class="divider"></div>
-  <div class="bar-legend">
-    <span><span class="bl-dot" style="background:#111;"></span>Can fulfill</span>
-    <span><span class="bl-dot" style="background:#E24B4A;"></span>Short</span>
-  </div>
-  <div style="display:flex;gap:24px;align-items:flex-end;height:100px;margin-top:10px;">
-    <div class="bar-item">
-      <div class="bar-seg-wrap">
-        <div class="bar-seg" id="bCC1" style="background:#111;height:0;"></div>
-        <div class="bar-seg" id="bCC2" style="background:#E24B4A;height:0;"></div>
-      </div>
-      <div class="bar-lbl">CC Cycling</div>
+  <div style="display:flex;align-items:center;gap:16px;justify-content:center;padding:8px 0 4px;">
+    <div style="position:relative;width:100px;height:100px;flex-shrink:0;">
+      <canvas id="pieFulfill" width="100" height="100"></canvas>
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;">{can_combined:,}<br><span style=\"font-size:10px;font-weight:400;color:#888;\">can fulfill</span></div>
     </div>
-    <div class="bar-item">
-      <div class="bar-seg-wrap">
-        <div class="bar-seg" id="bRR1" style="background:#E24B4A;height:0;"></div>
-        <div class="bar-seg" id="bRR2" style="background:#f5a5a5;height:0;"></div>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
+        <div style="width:9px;height:9px;border-radius:50%;background:#1D9E75;flex-shrink:0;"></div>
+        <span style="color:#888;">Can fulfill today</span>
+        <span style="margin-left:auto;font-weight:500;padding-left:16px;">{can_combined:,} ({pct_can}%)</span>
       </div>
-      <div class="bar-lbl">RR Running</div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
+        <div style="width:9px;height:9px;border-radius:50%;background:#E24B4A;flex-shrink:0;"></div>
+        <span style="color:#888;">Stock short</span>
+        <span style="margin-left:auto;font-weight:500;padding-left:16px;">{cannot_combined:,} ({p100}%)</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
+        <div style="width:9px;height:9px;border-radius:50%;background:#aaa;flex-shrink:0;"></div>
+        <span style="color:#888;">In transit cover</span>
+        <span style="margin-left:auto;font-weight:500;padding-left:16px;">{n_transit_cover:,}</span>
+      </div>
     </div>
   </div>
 </div>
@@ -560,25 +564,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <script>
 var isDark=window.matchMedia('(prefers-color-scheme:dark)').matches;
 var bg=isDark?'rgba(255,255,255,.1)':'#e5e5e5';
-function drawDonut(id,pct,fill,bg){{
+function drawDonut(id,pct,fill,bg,sz){{
   var c=document.getElementById(id);if(!c)return;
-  var ctx=c.getContext('2d'),cx=36,cy=36,r=28,lw=7,start=-Math.PI/2,target=pct/100,t0=null;
+  sz=sz||72;var half=sz/2;
+  var ctx=c.getContext('2d'),cx=half,cy=half,r=half*0.77,lw=sz*0.097,start=-Math.PI/2,target=pct/100,t0=null;
   function frame(now){{if(!t0)t0=now;var el=Math.min((now-t0)/900,1);
     var prog=target*(el<.5?2*el*el:-1+(4-2*el)*el);
-    ctx.clearRect(0,0,72,72);
+    ctx.clearRect(0,0,sz,sz);
     ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.strokeStyle=bg;ctx.lineWidth=lw;ctx.stroke();
     ctx.beginPath();ctx.arc(cx,cy,r,start,start+Math.PI*2*prog);ctx.strokeStyle=fill;ctx.lineWidth=lw;ctx.lineCap='round';ctx.stroke();
     if(el<1)requestAnimationFrame(frame);}}
   requestAnimationFrame(frame);
 }}
-function ab(id,h,d){{setTimeout(function(){{var e=document.getElementById(id);if(e)e.style.height=h+'px';}},d);}}
-var maxV=Math.max({cc_can},{cc_can_not},{rr_can},{rr_can_not},1);
-ab('bCC1',Math.round({cc_can}/maxV*75),200);
-ab('bCC2',Math.round({cc_can_not}/maxV*75),300);
-ab('bRR1',Math.round({rr_can}/maxV*75),400);
-ab('bRR2',Math.round({rr_can_not}/maxV*75),500);
 drawDonut('pieCC',{cc_pct_v},isDark?'#ddd':'#111',bg);
 drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
+drawDonut('pieFulfill',{pct_can},'#1D9E75',isDark?'#E24B4A':'#E24B4A',100);
 </script></body></html>"""
 
     # ── Render HTML dashboard ─────────────────────────────────────────
@@ -627,6 +627,18 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
 
     if ord_view is not None and inv_view is not None:
         fulf = check_fulfillability(ord_view, inv_view)
+
+        # Add open time in days to each order line
+        now_ts = pd.Timestamp.now(tz="UTC")
+        open_ord = ord_view[
+            ord_view["Fulfillment_Status"].isin(["unfulfilled","partial",""])
+        ].drop_duplicates("Order_ID")[["Order_ID","Created_At","Financial_Status"]].copy()
+        open_ord["Days Open"] = (
+            (now_ts - open_ord["Created_At"]).dt.total_seconds() / 86400
+        ).round(1)
+
+        fulf_t = fulf.merge(open_ord[["Order_ID","Days Open"]], on="Order_ID", how="left")
+
         pos_in_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
         transit_qty = {}
         for p in pos_in_transit:
@@ -638,18 +650,35 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
             if in_t==0: return "—",False
             elif in_t>=row["Gap"]: return f"🚚 Yes ({in_t})",True
             else: return f"⚠️ Partial ({in_t}/{row['Gap']})",False
-        cant_df = fulf[~fulf["Can_Fulfill"]].copy()
+
+        cant_df = fulf_t[~fulf_t["Can_Fulfill"]].copy()
         cant_df["_sku_up"] = cant_df["SKU"].astype(str).str.strip().str.upper()
         cant_df[["Transit_Status","_covered"]] = cant_df.apply(lambda r: pd.Series(_ts(r)), axis=1)
-        can_df = fulf[fulf["Can_Fulfill"]].sort_values("Order_ID")
-        if not cant_df.empty:
-            with st.expander(f"❌ {len(cant_df)} lines that cannot be fulfilled"):
-                show = cant_df[["Order_ID","SKU","Item_Name","Qty_Ordered","Available_Stock","Gap","Financial_Status","Transit_Status"]].copy()
-                show.columns = ["Order ID","SKU","Item","Qty Ordered","In Stock","Gap","Financial Status","In Transit PO"]
-                st.dataframe(show, use_container_width=True, hide_index=True)
-        if not can_df.empty:
-            with st.expander(f"✅ {len(can_df)} lines ready to ship"):
-                st.dataframe(can_df[["Order_ID","SKU","Item_Name","Qty_Ordered","Available_Stock","Financial_Status"]], use_container_width=True, hide_index=True)
+        can_df = fulf_t[fulf_t["Can_Fulfill"]].sort_values("Days Open", ascending=False)
+
+        # Summary badges
+        if not can_df.empty or not cant_df.empty:
+            c1, c2 = st.columns(2)
+            with c1:
+                avg_can = round(can_df["Days Open"].mean(), 1) if not can_df.empty else 0
+                with st.expander(f"✅ {len(can_df)} lines ready to ship — avg {avg_can} days open"):
+                    st.dataframe(
+                        can_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
+                                "Available_Stock","Financial_Status","Days Open"]]
+                        .rename(columns={"Order_ID":"Order","Item_Name":"Item",
+                                         "Qty_Ordered":"Qty","Available_Stock":"In Stock",
+                                         "Financial_Status":"Status"}),
+                        use_container_width=True, hide_index=True,
+                    )
+            with c2:
+                avg_cant = round(cant_df["Days Open"].mean(), 1) if not cant_df.empty else 0
+                with st.expander(f"❌ {len(cant_df)} lines stock short — avg {avg_cant} days open"):
+                    show = cant_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
+                                    "Available_Stock","Gap","Financial_Status",
+                                    "Transit_Status","Days Open"]].copy()
+                    show.columns = ["Order","SKU","Item","Qty","In Stock","Gap",
+                                    "Status","In Transit PO","Days Open"]
+                    st.dataframe(show, use_container_width=True, hide_index=True)
 
     if ord_view is not None:
         with st.expander("📋 All orders"):
