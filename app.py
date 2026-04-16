@@ -360,20 +360,27 @@ if page == "📊 Dashboard":
                 transit_qty[k] = transit_qty.get(k,0) + int(s.get("qty",0))
 
         n_transit_full = 0; n_transit_partial = 0; transit_units_coming = 0
-        total_lines_combined = 0; can_combined = 0; gap_combined = 0
+        n_transit_open_orders = 0; gap_combined = 0
+        total_lines_combined = 0; can_combined = 0
         if inv_view is not None and ord_view is not None:
             fulf_all = check_fulfillability(ord_view, inv_view)
             total_lines_combined = len(fulf_all)
             can_combined = int(fulf_all["Can_Fulfill"].sum())
             gap_combined = int(fulf_all["Gap"].sum())
             if transit_qty:
+                # Short lines covered by transit
                 cant_all = fulf_all[~fulf_all["Can_Fulfill"]].copy()
                 cant_all["_up"] = cant_all["SKU"].astype(str).str.strip().str.upper()
                 cant_all["_t"]   = cant_all["_up"].map(lambda k: transit_qty.get(k,0))
                 n_transit_full    = int((cant_all["_t"] >= cant_all["Gap"]).sum())
                 n_transit_partial = int(((cant_all["_t"] > 0) & (cant_all["_t"] < cant_all["Gap"])).sum())
                 transit_units_coming = int(cant_all[cant_all["_t"] > 0]["_t"].sum())
-        n_transit_cover = n_transit_full   # keep for backward compat label
+                # ALL open orders (fulfillable or not) with a SKU in transit
+                all_open = fulf_all.copy()
+                all_open["_up"] = all_open["SKU"].astype(str).str.strip().str.upper()
+                n_transit_open_orders = int((all_open["_up"].map(
+                    lambda k: transit_qty.get(k,0)) > 0).sum())
+        n_transit_cover = n_transit_full
         cannot_combined = total_lines_combined - can_combined
         pct_can = round(can_combined/total_lines_combined*100,1) if total_lines_combined else 0
         loc_html = loc_rows_html()
@@ -636,8 +643,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div class="fc-row">
     <div class="fc-box"><div class="fc-lbl">Open lines</div><div class="fc-val">{total_lines_combined:,}</div></div>
     <div class="fc-box"><div class="fc-lbl">Stock sufficient</div><div class="fc-val" style="color:#1D9E75;">{can_combined:,}</div><div class="fc-sub" style="color:#1D9E75;">{pct_can}%</div></div>
-    <div class="fc-box"><div class="fc-lbl">Stock short</div><div class="fc-val" style="color:#E24B4A;">{cannot_combined:,}</div><div class="fc-sub" style="color:#E24B4A;">{p100}%</div></div>
-    <div class="fc-box"><div class="fc-lbl">In transit cover</div><div class="fc-val">{n_transit_full:,} full · {n_transit_partial:,} partial</div><div class="fc-sub" style="color:#888;">{transit_units_coming:,} units coming · of {cannot_combined} short</div></div>
+    <div class="fc-box"><div class="fc-lbl">Stock short</div><div class="fc-val" style="color:#E24B4A;">{cannot_combined:,} lines</div><div class="fc-sub" style="color:#E24B4A;">{gap_combined:,} units needed · {p100}%</div></div>
+    <div class="fc-box"><div class="fc-lbl">In transit (short lines)</div><div class="fc-val">{n_transit_full:,} full · {n_transit_partial:,} partial</div><div class="fc-sub" style="color:#888;">{transit_units_coming:,} units coming · {n_transit_open_orders:,} open orders with transit SKUs</div></div>
   </div>
   <div style="border-top:1px solid #f0f0f0;padding-top:10px;margin-top:2px;">
     <div style="font-size:10px;color:#888;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Stock sufficient — {can_combined:,} lines · {total_units_needed:,} units · oldest open: {oldest_open_days} days</div>
