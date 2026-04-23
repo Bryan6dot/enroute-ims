@@ -397,3 +397,59 @@ def validate_orders_file(df: pd.DataFrame) -> list[str]:
         if col not in df.columns:
             warnings.append(f"❌ Missing required column: '{col}'")
     return warnings
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WAREHOUSE RECONCILIATION
+# ══════════════════════════════════════════════════════════════════════════════
+WH_COLS = {
+    "Location": "WH_Location", "Brand": "Brand", "Type": "Type",
+    "Description": "WH_Description", "Gender": "Gender", "Color": "Color",
+    "Size": "Size", "SKU#": "SKU", "Stock Qty": "WH_Qty",
+}
+
+def parse_warehouse(file) -> pd.DataFrame:
+    fname = getattr(file, "name", "")
+    raw = pd.read_csv(file) if fname.lower().endswith(".csv") else pd.read_excel(file)
+    col_map = {}
+    for wh_col, internal in WH_COLS.items():
+        for c in raw.columns:
+            if wh_col.lower() == c.lower().strip():
+                col_map[c] = internal; break
+        if internal not in col_map.values():
+            for c in raw.columns:
+                if wh_col.lower() in c.lower():
+                    col_map[c] = internal; break
+    df = raw.rename(columns=col_map)
+    keep = [v for v in WH_COLS.values() if v in df.columns]
+    df = df[keep].copy()
+    df["SKU"] = df["SKU"].astype(str).str.strip()
+    df = df[df["SKU"].ne("") & df["SKU"].ne("nan")].reset_index(drop=True)
+    if "WH_Qty" in df.columns:
+        df["WH_Qty"] = _to_num(df["WH_Qty"]).astype(int)
+    return df
+
+
+def reconcile_warehouse(wh_df: pd.DataFrame, inv_df: pd.DataFrame,
+                         shopify_location: str = "Online") -> pd.DataFrame:
+    """Match warehouse SKUs (left) against Shopify Online location. WH-driven."""
+    shop = inv_df[inv_df["Location"].str.strip().str.lower() == shopify_location.lower()]
+    shop_agg = shop.groupby("SKU").agg(
+        Title=("Title", "first"),
+        Shopify_OnHand=("On_Hand", "sum"),
+        Shopify_Available=("Available", "sum"),
+    ).reset_index()
+
+    agg_dict: dict = {"WH_Qty": ("WH_Qty", "sum")}
+    if "WH_Description" in wh_df.columns:
+        agg_dict["WH_Desc"] = ("WH_Description", "first")
+    wh_agg = wh_df.groupby("SKU").agg(**agg_dict).reset_index()
+
+    merged = wh_agg.merge(shop_agg, on="SKU", how="left")
+    merged["Shopify_OnHand"]    = merged["Shopify_OnHand"].fillna(0).astype(int)
+    merged["Shopify_Available"] = merged["Shopify_Available"].fillna(0).astype(int)
+    merged["WH_Qty"]            = merged["WH_Qty"].astype(int)
+    merged["Delta"]  = merged["Shopify_OnHand"] - merged["WH_Qty"]
+    merged["Status"] = merged["Delta"].apply(
+        lambda d: "✅ Match" if d == 0 else ("🔴 Shopify+" if d > 0 else "🔵 WH+")
+    )
+    return merged.sort_values("Delta", key=abs, ascending=False).reset_index(drop=True)
