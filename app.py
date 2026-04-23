@@ -1302,6 +1302,31 @@ elif page == "📦 Inventory Control":
             csv_out = disp[show_cols].to_csv(index=False).encode()
             st.download_button("📥 Export CSV", csv_out,
                                f"recon_{sel}.csv", mime="text/csv")
+            with tab3:
+        wh_df_t = st.session_state.wh_df
+        if wh_df_t is None:
+            st.info("...")
+        elif not st.session_state.inv_store:
+            st.info("...")
+        else:
+            # ... todo el código existente de tab3 ...
+            
+            st.download_button("📥 Export CSV", csv_out,
+                               f"recon_{sel}.csv", mime="text/csv")
+            
+            # ↓ AGREGAR AQUÍ ↓
+            with st.expander("🔧 Debug info"):
+                st.write("**Locations en Shopify:**", 
+                         inv_s["Location"].unique().tolist())
+                st.write("**Columnas WH parseadas:**", 
+                         wh_df_t.columns.tolist())
+                st.write("**Gender values únicos:**", 
+                         wh_df_t["Gender"].unique().tolist() 
+                         if "Gender" in wh_df_t.columns else "columna no encontrada")
+                st.write("**Sample SKUs WH:**", 
+                         wh_df_t["SKU"].head(5).tolist())
+                st.write("**Sample SKUs Shopify Online:**",
+                         inv_s[inv_s["Location"].str.lower().str.contains("online", na=False)]["SKU"].head(5).tolist())
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: PO TRACKER
