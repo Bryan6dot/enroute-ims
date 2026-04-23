@@ -242,6 +242,30 @@ if page == "📊 Dashboard":
                     _rebuild_combined()
                     st.rerun()
 
+        # ── Warehouse physical count ───────────────────────────────────
+        st.markdown("**🏭 Warehouse Physical Count**")
+        st.caption("Reporte interno almacén — columnas: SKU# · Stock Qty (Location=Online en Shopify)")
+        wc1, wc2 = st.columns([9, 1])
+        with wc1:
+            wh_file = st.file_uploader(
+                "wh", type=["csv", "xlsx"], key="wh_upload", label_visibility="collapsed"
+            )
+            if wh_file:
+                try:
+                    wdf = parse_warehouse(wh_file)
+                    st.session_state.wh_df = wdf
+                    st.success(f"✅ {wdf['SKU'].nunique():,} SKUs — warehouse")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            elif st.session_state.wh_df is not None:
+                st.success(f"✅ Loaded — {st.session_state.wh_df['SKU'].nunique():,} SKUs")
+        with wc2:
+            st.caption(" ")
+            if st.button("🗑", key="clear_wh", help="Clear warehouse data",
+                         disabled=(st.session_state.wh_df is None)):
+                st.session_state.wh_df = None
+                st.rerun()
+
             st.divider()
 
     inv_df = st.session_state.inv_df
@@ -901,6 +925,35 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
                     use_container_width=True, hide_index=True,
                 )
 
+# ── WAREHOUSE RECONCILIATION KPIs ─────────────────────────────────
+    wh_df_sess = st.session_state.wh_df
+    if wh_df_sess is not None:
+        st.divider()
+        st.markdown("#### 🏭 Warehouse Reconciliation — Physical vs Shopify Online")
+        st.caption("Basado en SKUs del reporte warehouse · Location 'Online' en Shopify")
+
+        def _recon_kpis(store_code, label):
+            inv_s = st.session_state.inv_store.get(store_code)
+            if inv_s is None:
+                st.info(f"Carga el archivo Shopify de {label} para ver reconciliation.")
+                return
+            r = reconcile_warehouse(wh_df_sess, inv_s)
+            total   = len(r)
+            matched = (r["Status"] == "✅ Match").sum()
+            acc     = round(matched / total * 100, 1) if total else 0
+            delta_u = int(r["Delta"].abs().sum())
+            with st.container(border=True):
+                st.markdown(f"**{label}**")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("SKUs analizados", f"{total:,}")
+                m2.metric("Accuracy",        f"{acc}%")
+                m3.metric("Δ unidades",      f"{delta_u:,}")
+                m4.metric("Discrepancias",   f"{total - matched:,}")
+
+        col_cc, col_rr = st.columns(2)
+        with col_cc: _recon_kpis("CC", "🚴 Cycling (CC)")
+        with col_rr: _recon_kpis("RR", "🏃 Running (RR)")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: INVENTORY CONTROL
@@ -908,7 +961,7 @@ drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
 elif page == "📦 Inventory Control":
     st.title("📦 Inventory Control")
 
-    tab1, tab2 = st.tabs(["📊 Inventory by Location", "📥 Receive PO"])
+    tab1, tab2, tab3 = st.tabs(["📊 Inventory by Location", "📥 Receive PO", "🔍 WH Reconciliation"])
 
     # ── TAB 1: INVENTORY DETAIL ───────────────────────────────────────────
     with tab1:
@@ -1201,7 +1254,53 @@ elif page == "📦 Inventory Control":
                                 mo_df = pd.DataFrame(matched)[["order","sku","item","qty"]]
                                 mo_df.columns = ["Order ID","SKU","Item","Qty Needed"]
                                 st.dataframe(mo_df, use_container_width=True, hide_index=True)
+   
+    # ── TAB 3: WAREHOUSE RECONCILIATION DETAIL ────────────────────────
+    with tab3:
+        wh_df_t = st.session_state.wh_df
+        if wh_df_t is None:
+            st.info("Carga el reporte warehouse desde Dashboard → Upload para habilitar esta vista.")
+        elif not st.session_state.inv_store:
+            st.info("Carga al menos un archivo Shopify de inventario.")
+        else:
+            avail_stores = [s for s in ["CC", "RR"] if s in st.session_state.inv_store]
+            store_labels = {"CC": "🚴 Cycling (CC)", "RR": "🏃 Running (RR)"}
+            sel = st.selectbox("Store", avail_stores,
+                               format_func=lambda s: store_labels.get(s, s),
+                               key="recon_store_ic")
+            inv_s = st.session_state.inv_store[sel]
+            recon = reconcile_warehouse(wh_df_t, inv_s)
 
+            total   = len(recon)
+            matched = (recon["Status"] == "✅ Match").sum()
+            acc     = round(matched / total * 100, 1) if total else 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            kpi(c1, "SKUs (WH)",     f"{total:,}")
+            kpi(c2, "Accuracy",      f"{acc}%")
+            kpi(c3, "Δ Units Total", f"{int(recon['Delta'].abs().sum()):,}")
+            kpi(c4, "Mismatches",    f"{total - matched:,}")
+
+            st.divider()
+            filt = st.selectbox("Filtrar", ["All", "✅ Match", "🔴 Shopify+", "🔵 WH+"],
+                                key="recon_filt")
+            disp = recon if filt == "All" else recon[recon["Status"] == filt]
+
+            base_cols = ["SKU", "WH_Qty", "Shopify_OnHand", "Delta", "Status"]
+            if "WH_Desc" in disp.columns: base_cols.insert(1, "WH_Desc")
+            if "Title"   in disp.columns: base_cols.insert(1, "Title")
+            show_cols = [c for c in base_cols if c in disp.columns]
+
+            st.dataframe(
+                disp[show_cols].rename(columns={
+                    "WH_Qty": "WH Stock", "Shopify_OnHand": "Shopify OnHand",
+                    "WH_Desc": "WH Description",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            csv_out = disp[show_cols].to_csv(index=False).encode()
+            st.download_button("📥 Export CSV", csv_out,
+                               f"recon_{sel}.csv", mime="text/csv")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: PO TRACKER
