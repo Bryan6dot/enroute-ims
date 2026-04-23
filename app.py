@@ -1286,18 +1286,19 @@ elif page == "📦 Inventory Control":
                                 key="recon_filt")
             disp = recon if filt == "All" else recon[recon["Status"] == filt]
 
-            base_cols = ["SKU", "WH_Qty", "Shopify_OnHand", "Delta", "Status"]
-            if "WH_Desc" in disp.columns: base_cols.insert(1, "WH_Desc")
-            if "Title"   in disp.columns: base_cols.insert(1, "Title")
+            base_cols = ["WH_SKU", "Shopify_SKU", "Match_Type", "WH_Desc", "Title",
+                         "WH_Qty", "Shopify_OnHand", "Delta", "Status"]
             show_cols = [c for c in base_cols if c in disp.columns]
 
             st.dataframe(
                 disp[show_cols].rename(columns={
+                    "WH_SKU": "WH SKU", "Shopify_SKU": "Shopify SKU",
+                    "Match_Type": "Match", "WH_Desc": "WH Description",
                     "WH_Qty": "WH Stock", "Shopify_OnHand": "Shopify OnHand",
-                    "WH_Desc": "WH Description",
                 }),
                 use_container_width=True, hide_index=True,
             )
+            
             csv_out = disp[show_cols].to_csv(index=False).encode()
             st.download_button("📥 Export CSV", csv_out,
                                f"recon_{sel}.csv", mime="text/csv")
