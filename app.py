@@ -22,6 +22,7 @@ try:
         inventory_by_sku, orders_summary,
         check_fulfillability,
         validate_inventory_file, validate_orders_file,
+        parse_warehouse, reconcile_warehouse,    
     )
     ENGINE_OK = True
 except ImportError:
@@ -49,6 +50,7 @@ _defaults = {
     "inv_store":    {},     # {"CC": df, "RR": df} — per-store raw
     "ord_store":    {},     # {"CC": df, "RR": df} — per-store raw
     "po_published": None,
+    "wh_df": None,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
