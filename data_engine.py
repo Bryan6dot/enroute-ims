@@ -447,34 +447,28 @@ def _ins_gender(s: str, gp: str):
     return (m.group(1) + gp + m.group(2)) if m else None
 
 def _ins_zero(s: str):
-    v = _re.sub(r'(?<=-)(\d)([\.,]\d)', r'0\1\2', s)
+    """Single-digit size → zero-padded. Works for int (-8→-08) and decimal (-8.5→-08.5)."""
+    v = _re.sub(r'(?<=-)(\d)([\.,]\d)', r'0\1\2', s)  # decimal: -8.5 → -08.5
     if v != s: return v
-    v = _re.sub(r'(?<=-)(\d)$', r'0\1', s)
+    v = _re.sub(r'(?<=-)(\d)$', r'0\1', s)             # integer: -8  → -08
     return v if v != s else None
-
-def _dot_comma(s: str):
-    p = s.rsplit('-', 1)
-    if len(p) == 2 and '.' in p[1]:
-        return p[0] + '-' + p[1].replace('.', ',')
-    return None
 
 def _sku_candidates(wh_sku: str, gender_val: str) -> list:
     base = wh_sku.strip()
     gp   = _gender_prefix(gender_val)
-    size_variants = [base]
-    z  = _ins_zero(base)
-    dc = _dot_comma(base)
-    if z:  size_variants.append(z)
-    if dc: size_variants.append(dc)
-    if z:
-        zdc = _dot_comma(z)
-        if zdc: size_variants.append(zdc)
-    all_candidates = list(size_variants)
-    for s in size_variants:
-        g = _ins_gender(s, gp)
-        if g and g not in all_candidates:
-            all_candidates.append(g)
-    return all_candidates
+
+    variants = [base]
+    z = _ins_zero(base)
+    if z: variants.append(z)
+
+    all_cands = list(variants)
+    if gp:
+        for s in variants:
+            g = _ins_gender(s, gp)
+            if g and g not in all_cands:
+                all_cands.append(g)
+
+    return all_cands
 
 
 def reconcile_warehouse(wh_df: pd.DataFrame, inv_df: pd.DataFrame,
