@@ -438,31 +438,34 @@ _GENDER_MAP = {
     "w": "W", "women": "W", "womens": "W", "female": "W", "mujer": "W", "wmn": "W",
 }
 
-def _gender_prefix(gender_val: str) -> str:
-    return _GENDER_MAP.get(str(gender_val).strip().lower(), "")
+def _gender_prefix(gender_val: str) -> list:
+    """Returns list of gender prefixes to try. Falls back to [M, W] if unrecognized."""
+    v = str(gender_val).strip().lower().replace("'", "").replace("'s","")
+    known = {
+        "m": ["M"], "men": ["M"], "mens": ["M"], "male": ["M"],
+        "hombre": ["M"], "man": ["M"], "caballero": ["M"], "h": ["M"],
+        "w": ["W"], "women": ["W"], "womens": ["W"], "female": ["W"],
+        "mujer": ["W"], "wmn": ["W"], "woman": ["W"], "dama": ["W"], "d": ["W"],
+        "u": ["M","W"], "unisex": ["M","W"], "uni": ["M","W"],
+    }
+    if v in known:
+        return known[v]
+    # Non-empty but unrecognized → try both
+    if v and v not in ("nan", "none", "", "n/a"):
+        return ["M", "W"]
+    return []
 
-def _ins_gender(s: str, gp: str):
-    if not gp: return None
-    m = _re.match(r'^(.*-)([^-]+)$', s)
-    return (m.group(1) + gp + m.group(2)) if m else None
-
-def _ins_zero(s: str):
-    """Single-digit size → zero-padded. Works for int (-8→-08) and decimal (-8.5→-08.5)."""
-    v = _re.sub(r'(?<=-)(\d)([\.,]\d)', r'0\1\2', s)  # decimal: -8.5 → -08.5
-    if v != s: return v
-    v = _re.sub(r'(?<=-)(\d)$', r'0\1', s)             # integer: -8  → -08
-    return v if v != s else None
 
 def _sku_candidates(wh_sku: str, gender_val: str) -> list:
     base = wh_sku.strip()
-    gp   = _gender_prefix(gender_val)
+    prefixes = _gender_prefix(gender_val)  # now a list
 
     variants = [base]
     z = _ins_zero(base)
     if z: variants.append(z)
 
     all_cands = list(variants)
-    if gp:
+    for gp in prefixes:
         for s in variants:
             g = _ins_gender(s, gp)
             if g and g not in all_cands:
