@@ -8,6 +8,7 @@ Handles all column mapping, normalization, and business logic for:
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import re as _re
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EXACT COLUMN NAMES — Shopify Inventory Export
@@ -429,27 +430,93 @@ def parse_warehouse(file) -> pd.DataFrame:
     return df
 
 
+# ── SKU normalization helpers ─────────────────────────────────────────────────
+_GENDER_MAP = {
+    "m": "M", "men": "M", "mens": "M", "male": "M", "hombre": "M", "man": "M",
+    "w": "W", "women": "W", "womens": "W", "female": "W", "mujer": "W", "wmn": "W",
+}
+
+def _normalize_size_zeros(sku: str) -> str:
+    """3MF10270753-08.5 → 3MF10270753-8.5  (and vice versa stored as candidate)"""
+    return _re.sub(r'(?<=-)(0+)(\d)', r'\2', sku)
+
+def _add_zero_size(sku: str) -> str:
+    """3MF10270753-8.5 → 3MF10270753-08.5"""
+    return _re.sub(r'(?<=-)(\d)(\.\d)', r'0\1\2', sku)
+
+def _gender_prefix(gender_val: str) -> str:
+    return _GENDER_MAP.get(str(gender_val).strip().lower(), "")
+
+def _sku_candidates(wh_sku: str, gender_val: str) -> list[str]:
+    """Return ordered list of Shopify SKU candidates to try for a given WH SKU."""
+    base = wh_sku.strip()
+    norm = _normalize_size_zeros(base)   # remove leading zero
+    zero = _add_zero_size(base)          # add leading zero
+
+    candidates = [base, norm, zero]
+
+    gp = _gender_prefix(gender_val)
+    if gp:
+        # Insert gender prefix before last dash-segment: BASE-SIZE → BASE-[M/W]SIZE
+        for src in [base, norm, zero]:
+            m = _re.match(r'^(.*-)([^-]+)$', src)
+            if m:
+                candidates.append(m.group(1) + gp + m.group(2))
+
+    # Deduplicate preserving order
+    seen, out = set(), []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c); out.append(c)
+    return out
+
+
 def reconcile_warehouse(wh_df: pd.DataFrame, inv_df: pd.DataFrame,
                          shopify_location: str = "Online") -> pd.DataFrame:
-    """Match warehouse SKUs (left) against Shopify Online location. WH-driven."""
+    """
+    Match warehouse SKUs against Shopify Online location.
+    WH-driven: only WH SKUs are evaluated.
+    Applies SKU normalization: gender prefix (M/W) + leading-zero size variants.
+    """
     shop = inv_df[inv_df["Location"].str.strip().str.lower() == shopify_location.lower()]
     shop_agg = shop.groupby("SKU").agg(
         Title=("Title", "first"),
         Shopify_OnHand=("On_Hand", "sum"),
         Shopify_Available=("Available", "sum"),
     ).reset_index()
+    shop_dict = shop_agg.set_index("SKU").to_dict("index")
 
     agg_dict: dict = {"WH_Qty": ("WH_Qty", "sum")}
-    if "WH_Description" in wh_df.columns:
-        agg_dict["WH_Desc"] = ("WH_Description", "first")
+    if "WH_Description" in wh_df.columns: agg_dict["WH_Desc"] = ("WH_Description", "first")
+    if "Gender"         in wh_df.columns: agg_dict["Gender"]  = ("Gender",          "first")
     wh_agg = wh_df.groupby("SKU").agg(**agg_dict).reset_index()
 
-    merged = wh_agg.merge(shop_agg, on="SKU", how="left")
-    merged["Shopify_OnHand"]    = merged["Shopify_OnHand"].fillna(0).astype(int)
-    merged["Shopify_Available"] = merged["Shopify_Available"].fillna(0).astype(int)
-    merged["WH_Qty"]            = merged["WH_Qty"].astype(int)
-    merged["Delta"]  = merged["Shopify_OnHand"] - merged["WH_Qty"]
-    merged["Status"] = merged["Delta"].apply(
-        lambda d: "✅ Match" if d == 0 else ("🔴 Shopify+" if d > 0 else "🔵 WH+")
-    )
-    return merged.sort_values("Delta", key=abs, ascending=False).reset_index(drop=True)
+    rows = []
+    for _, row in wh_agg.iterrows():
+        wh_sku  = row["SKU"]
+        gender  = row.get("Gender", "") if "Gender" in wh_agg.columns else ""
+        cands   = _sku_candidates(wh_sku, str(gender))
+
+        matched_sku = next((c for c in cands if c in shop_dict), None)
+        exact       = matched_sku == wh_sku if matched_sku else False
+        s           = shop_dict[matched_sku] if matched_sku else {}
+
+        rows.append({
+            "WH_SKU":           wh_sku,
+            "Shopify_SKU":      matched_sku or "—",
+            "Match_Type":       "Exact" if exact else ("Normalized" if matched_sku else "Not Found"),
+            "WH_Desc":          row.get("WH_Desc", ""),
+            "Title":            s.get("Title", ""),
+            "WH_Qty":           int(row["WH_Qty"]),
+            "Shopify_OnHand":   int(s.get("Shopify_OnHand", 0)),
+            "Shopify_Available":int(s.get("Shopify_Available", 0)),
+        })
+
+    df = pd.DataFrame(rows)
+    df["Delta"] = df["Shopify_OnHand"] - df["WH_Qty"]
+    df["Status"] = df.apply(lambda r:
+        "⚠️ No encontrado" if r["Match_Type"] == "Not Found" else
+        ("✅ Match"        if r["Delta"] == 0  else
+        ("🔴 Shopify+"    if r["Delta"] >  0  else "🔵 WH+")), axis=1)
+
+    return df.sort_values("Delta", key=abs, ascending=False).reset_index(drop=True)
