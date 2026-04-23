@@ -431,53 +431,54 @@ def parse_warehouse(file) -> pd.DataFrame:
 
 
 # ── SKU normalization helpers ─────────────────────────────────────────────────
+import re as _re
+
 _GENDER_MAP = {
     "m": "M", "men": "M", "mens": "M", "male": "M", "hombre": "M", "man": "M",
     "w": "W", "women": "W", "womens": "W", "female": "W", "mujer": "W", "wmn": "W",
 }
 
-def _normalize_size_zeros(sku: str) -> str:
-    """3MF10270753-08.5 → 3MF10270753-8.5  (and vice versa stored as candidate)"""
-    return _re.sub(r'(?<=-)(0+)(\d)', r'\2', sku)
-
-def _add_zero_size(sku: str) -> str:
-    """3MF10270753-8.5 → 3MF10270753-08.5"""
-    return _re.sub(r'(?<=-)(\d)(\.\d)', r'0\1\2', sku)
-
 def _gender_prefix(gender_val: str) -> str:
     return _GENDER_MAP.get(str(gender_val).strip().lower(), "")
 
-def _sku_candidates(wh_sku: str, gender_val: str) -> list[str]:
-    """Return ordered list of Shopify SKU candidates to try for a given WH SKU."""
+def _ins_gender(s: str, gp: str):
+    if not gp: return None
+    m = _re.match(r'^(.*-)([^-]+)$', s)
+    return (m.group(1) + gp + m.group(2)) if m else None
+
+def _ins_zero(s: str):
+    v = _re.sub(r'(?<=-)(\d)([\.,]\d)', r'0\1\2', s)
+    if v != s: return v
+    v = _re.sub(r'(?<=-)(\d)$', r'0\1', s)
+    return v if v != s else None
+
+def _dot_comma(s: str):
+    p = s.rsplit('-', 1)
+    if len(p) == 2 and '.' in p[1]:
+        return p[0] + '-' + p[1].replace('.', ',')
+    return None
+
+def _sku_candidates(wh_sku: str, gender_val: str) -> list:
     base = wh_sku.strip()
-    norm = _normalize_size_zeros(base)   # remove leading zero
-    zero = _add_zero_size(base)          # add leading zero
-
-    candidates = [base, norm, zero]
-
-    gp = _gender_prefix(gender_val)
-    if gp:
-        # Insert gender prefix before last dash-segment: BASE-SIZE → BASE-[M/W]SIZE
-        for src in [base, norm, zero]:
-            m = _re.match(r'^(.*-)([^-]+)$', src)
-            if m:
-                candidates.append(m.group(1) + gp + m.group(2))
-
-    # Deduplicate preserving order
-    seen, out = set(), []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c); out.append(c)
-    return out
+    gp   = _gender_prefix(gender_val)
+    size_variants = [base]
+    z  = _ins_zero(base)
+    dc = _dot_comma(base)
+    if z:  size_variants.append(z)
+    if dc: size_variants.append(dc)
+    if z:
+        zdc = _dot_comma(z)
+        if zdc: size_variants.append(zdc)
+    all_candidates = list(size_variants)
+    for s in size_variants:
+        g = _ins_gender(s, gp)
+        if g and g not in all_candidates:
+            all_candidates.append(g)
+    return all_candidates
 
 
 def reconcile_warehouse(wh_df: pd.DataFrame, inv_df: pd.DataFrame,
                          shopify_location: str = "Online") -> pd.DataFrame:
-    """
-    Match warehouse SKUs against Shopify Online location.
-    WH-driven: only WH SKUs are evaluated.
-    Applies SKU normalization: gender prefix (M/W) + leading-zero size variants.
-    """
     shop = inv_df[inv_df["Location"].str.strip().str.lower() == shopify_location.lower()]
     shop_agg = shop.groupby("SKU").agg(
         Title=("Title", "first"),
@@ -493,23 +494,24 @@ def reconcile_warehouse(wh_df: pd.DataFrame, inv_df: pd.DataFrame,
 
     rows = []
     for _, row in wh_agg.iterrows():
-        wh_sku  = row["SKU"]
-        gender  = row.get("Gender", "") if "Gender" in wh_agg.columns else ""
-        cands   = _sku_candidates(wh_sku, str(gender))
+        wh_sku = row["SKU"]
+        gender = row.get("Gender", "") if "Gender" in wh_agg.columns else ""
+        cands  = _sku_candidates(wh_sku, str(gender))
 
         matched_sku = next((c for c in cands if c in shop_dict), None)
-        exact       = matched_sku == wh_sku if matched_sku else False
-        s           = shop_dict[matched_sku] if matched_sku else {}
+        s = shop_dict[matched_sku] if matched_sku else {}
 
         rows.append({
-            "WH_SKU":           wh_sku,
-            "Shopify_SKU":      matched_sku or "—",
-            "Match_Type":       "Exact" if exact else ("Normalized" if matched_sku else "Not Found"),
-            "WH_Desc":          row.get("WH_Desc", ""),
-            "Title":            s.get("Title", ""),
-            "WH_Qty":           int(row["WH_Qty"]),
-            "Shopify_OnHand":   int(s.get("Shopify_OnHand", 0)),
-            "Shopify_Available":int(s.get("Shopify_Available", 0)),
+            "WH_SKU":            wh_sku,
+            "Shopify_SKU":       matched_sku or "—",
+            "Match_Type":        "Exact"      if matched_sku == wh_sku
+                             else "Normalized" if matched_sku
+                             else "Not Found",
+            "WH_Desc":           row.get("WH_Desc", ""),
+            "Title":             s.get("Title", ""),
+            "WH_Qty":            int(row["WH_Qty"]),
+            "Shopify_OnHand":    int(s.get("Shopify_OnHand", 0)),
+            "Shopify_Available": int(s.get("Shopify_Available", 0)),
         })
 
     df = pd.DataFrame(rows)
