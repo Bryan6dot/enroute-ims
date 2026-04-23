@@ -427,8 +427,23 @@ def parse_warehouse(file) -> pd.DataFrame:
     df = df[df["SKU"].ne("") & df["SKU"].ne("nan")].reset_index(drop=True)
     if "WH_Qty" in df.columns:
         df["WH_Qty"] = _to_num(df["WH_Qty"]).astype(int)
+    if "Gender" in df.columns:
+        _gmap = {
+            "m": "M", "men": "M", "mens": "M", "male": "M",
+            "man": "M", "hombre": "M", "caballero": "M", "h": "M",
+            "w": "W", "women": "W", "womens": "W", "female": "W",
+            "woman": "W", "mujer": "W", "dama": "W", "d": "W",
+            "u": "U", "unisex": "U",
+        }
+        df["Gender"] = (
+            df["Gender"]
+            .astype(str).str.strip().str.lower()
+            .str.replace(r"['\s]", "", regex=True)
+            .str.replace("'s", "", regex=False)
+            .map(_gmap)
+            .fillna("U")
+        )
     return df
-
 
 # ── SKU normalization helpers ─────────────────────────────────────────────────
 
@@ -459,12 +474,12 @@ def _gender_prefix(gender_val: str) -> list:
     return []
 
 def _sku_candidates(wh_sku: str, gender_val: str) -> list:
-    base = wh_sku.strip()
-    prefixes = _gender_prefix(gender_val)
-
+    base     = wh_sku.strip()
     variants = [base]
     z = _ins_zero(base)
     if z: variants.append(z)
+
+    prefixes = {"M": ["M"], "W": ["W"]}.get(gender_val, ["M", "W"])
 
     all_cands = list(variants)
     for gp in prefixes:
