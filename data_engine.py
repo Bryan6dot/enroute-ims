@@ -431,16 +431,20 @@ def parse_warehouse(file) -> pd.DataFrame:
 
 
 # ── SKU normalization helpers ─────────────────────────────────────────────────
-import re as _re
 
-_GENDER_MAP = {
-    "m": "M", "men": "M", "mens": "M", "male": "M", "hombre": "M", "man": "M",
-    "w": "W", "women": "W", "womens": "W", "female": "W", "mujer": "W", "wmn": "W",
-}
+def _ins_zero(s: str):
+    v = _re.sub(r'(?<=-)(\d)([\.,]\d)', r'0\1\2', s)
+    if v != s: return v
+    v = _re.sub(r'(?<=-)(\d)$', r'0\1', s)
+    return v if v != s else None
+
+def _ins_gender(s: str, gp: str):
+    if not gp: return None
+    m = _re.match(r'^(.*-)([^-]+)$', s)
+    return (m.group(1) + gp + m.group(2)) if m else None
 
 def _gender_prefix(gender_val: str) -> list:
-    """Returns list of gender prefixes to try. Falls back to [M, W] if unrecognized."""
-    v = str(gender_val).strip().lower().replace("'", "").replace("'s","")
+    v = str(gender_val).strip().lower().replace("'", "").replace("'s", "")
     known = {
         "m": ["M"], "men": ["M"], "mens": ["M"], "male": ["M"],
         "hombre": ["M"], "man": ["M"], "caballero": ["M"], "h": ["M"],
@@ -450,15 +454,13 @@ def _gender_prefix(gender_val: str) -> list:
     }
     if v in known:
         return known[v]
-    # Non-empty but unrecognized → try both
     if v and v not in ("nan", "none", "", "n/a"):
         return ["M", "W"]
     return []
 
-
 def _sku_candidates(wh_sku: str, gender_val: str) -> list:
     base = wh_sku.strip()
-    prefixes = _gender_prefix(gender_val)  # now a list
+    prefixes = _gender_prefix(gender_val)
 
     variants = [base]
     z = _ins_zero(base)
