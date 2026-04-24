@@ -531,7 +531,7 @@ def reconcile_warehouse(wh_df: pd.DataFrame, inv_df: pd.DataFrame,
     df = pd.DataFrame(rows)
     df["Delta"] = df["Shopify_OnHand"] - df["WH_Qty"]
     df["Status"] = df.apply(lambda r:
-        "⚠️ No encontrado" if r["Match_Type"] == "Not Found" else
+        "⚠️ Not Found" if r["Match_Type"] == "Not Found" else
         ("✅ Match"        if r["Delta"] == 0  else
         ("🔴 Shopify+"    if r["Delta"] >  0  else "🔵 WH+")), axis=1)
 
