@@ -1,23 +1,57 @@
 """
 data_engine.py — Enroute IMS
 Handles all column mapping, normalization, and business logic for:
-  - Shopify Inventory Export  (inventoryexport.csv)
-  - Shopify Orders Export     (OdersExport.csv / OrdersExport.csv)
+  - Shopify Inventory Export  (CC and RR stores)
+  - Shopify Orders Export     (CC and RR stores)
+  - Warehouse Export          (Online location — shared central warehouse)
 """
 
+import io
+import re
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import re as _re
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EXACT COLUMN NAMES — Shopify Inventory Export
-# Full set as confirmed by Enroute team.
-# Exact matching avoids the "available" ⊂ "unavailable" substring collision bug.
-# "On hand (new)" kept for completeness but not used in calculations.
+# ENCODING HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+def _detect_encoding(raw_bytes: bytes) -> str:
+    """Try common encodings; latin-1 is the final fallback (never raises)."""
+    for enc in ["utf-8", "windows-1252", "latin-1"]:
+        try:
+            raw_bytes.decode(enc)
+            return enc
+        except UnicodeDecodeError:
+            continue
+    return "latin-1"
+
+
+def _read_csv(file) -> pd.DataFrame:
+    """Read a CSV from a file path or Streamlit UploadedFile, auto-detecting encoding."""
+    raw = file.read() if hasattr(file, "read") else open(file, "rb").read()
+    enc = _detect_encoding(raw)
+    return pd.read_csv(io.BytesIO(raw), encoding=enc, encoding_errors="replace")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKU NORMALIZATION
+# ══════════════════════════════════════════════════════════════════════════════
+def normalize_sku(sku) -> str:
+    """
+    Strip all non-alphanumeric characters and lowercase.
+    Examples:
+        '3MF10263318-10.5'  → '3mf10263318105'
+        '3MF10263318- 10,5' → '3mf10263318105'
+        'X000010253019 '    → 'x000010253019'
+        'HELM-GV-M'         → 'helmgvm'
+    """
+    return re.sub(r"[^a-z0-9]", "", str(sku).lower().strip())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COLUMN MAPS
 # ══════════════════════════════════════════════════════════════════════════════
 INV_COLS = {
-    # Raw Shopify column            →  Internal name
     "Handle":                          "Handle",
     "Title":                           "Title",
     "Option1 Name":                    "Option1_Name",
@@ -34,17 +68,12 @@ INV_COLS = {
     "Incoming (not editable)":         "Incoming",
     "Unavailable (not editable)":      "Unavailable",
     "Committed (not editable)":        "Committed",
-    "Available (not editable)":        "Available",   # ← exact match, NOT substring
-    "On hand (current)":               "On_Hand",     # ← source of truth for stock
-    "On hand (new)":                   "On_Hand_New", # ← edit field, not used in calcs
+    "Available (not editable)":        "Available",
+    "On hand (current)":               "On_Hand",
+    "On hand (new)":                   "On_Hand_New",
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
-# EXACT COLUMN NAMES — Shopify Orders Export
-# Full set as confirmed by Enroute team.
-# ══════════════════════════════════════════════════════════════════════════════
 ORD_COLS = {
-    # Raw Shopify column            →  Internal name
     "Name":                            "Order_ID",
     "Email":                           "Email",
     "Financial Status":                "Financial_Status",
@@ -97,43 +126,43 @@ ORD_COLS = {
     "Vendor":                          "Vendor",
 }
 
+# Warehouse export column map — flexible to handle slight header variations
+WH_COLS = {
+    "SKU#":        "SKU",
+    "SKU":         "SKU",          # fallback if header is just "SKU"
+    "Description": "Description",
+    "Stock Qty":   "Stock_Qty",
+    "Qty":         "Stock_Qty",    # fallback
+    "Brand":       "Brand",
+    "Type":        "Type",
+    "Gender":      "Gender",
+    "Color":       "Color",
+    "Size":        "Size",
+    "Location":    "Location",
+}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 def _to_num(series: pd.Series) -> pd.Series:
-    """Convert column to numeric; 'not stocked' and blanks → 0."""
     return pd.to_numeric(series, errors="coerce").fillna(0)
 
 
 def _rename_exact(df: pd.DataFrame, col_map: dict) -> pd.DataFrame:
-    """
-    Rename only columns that exist in the file using exact matching.
-    Columns not in the map are dropped (keeps the df clean).
-    """
-    present = {raw: internal
-               for raw, internal in col_map.items()
-               if raw in df.columns}
+    """Rename only columns present in the file using exact matching."""
+    present = {raw: internal for raw, internal in col_map.items() if raw in df.columns}
     df = df.rename(columns=present)
     return df[list(present.values())]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# INVENTORY PARSER
+# INVENTORY PARSER  (Shopify export — CC or RR)
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_inventory(file) -> pd.DataFrame:
-    """
-    Parse the Shopify Inventory Export.
-    Returns a clean DataFrame with one row per SKU+Location combination.
-    Numeric columns are safe (no 'not stocked' strings).
-
-    Key columns in result:
-        SKU, Title, Option1_Value, Option2_Value, Option3_Value,
-        Location, Incoming, Unavailable, Committed, Available, On_Hand
-    """
-    raw = pd.read_csv(file) if isinstance(file, str) else pd.read_csv(file)
+    raw = _read_csv(file)
     df  = _rename_exact(raw, INV_COLS)
 
-    # Ensure all expected columns exist (guard against partial exports)
     numeric_cols = ["Incoming", "Unavailable", "Committed", "Available", "On_Hand"]
     for col in numeric_cols:
         if col in df.columns:
@@ -141,102 +170,147 @@ def parse_inventory(file) -> pd.DataFrame:
         else:
             df[col] = 0
 
-    # Drop rows with no SKU (image/blank rows in Shopify exports)
     df = df[df["SKU"].astype(str).str.strip().ne("")].reset_index(drop=True)
 
-    # Build a human-readable variant label
     def variant_label(row):
         parts = [row.get("Option1_Value",""), row.get("Option2_Value",""), row.get("Option3_Value","")]
         return " / ".join(p for p in parts if str(p).strip() not in ["", "nan"])
     df["Variant"] = df.apply(variant_label, axis=1)
 
+    # ── Normalize SKU for cross-source matching ───────────────────────────
+    df["SKU_norm"] = df["SKU"].apply(normalize_sku)
+
     return df
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# WAREHOUSE PARSER  (Online location — shared central warehouse)
+# ══════════════════════════════════════════════════════════════════════════════
+def parse_warehouse(file) -> pd.DataFrame:
+    """
+    Parse the central warehouse export.
+    Expected columns: Location, Brand, Type, Description, Gender, Color, Size, SKU#, Stock Qty
+    Returns a clean DataFrame with SKU_norm for joining to Shopify exports.
+    """
+    raw = _read_csv(file)
+
+    # Rename whatever columns are present
+    df = raw.rename(columns={k: v for k, v in WH_COLS.items() if k in raw.columns})
+
+    # Ensure SKU column exists
+    if "SKU" not in df.columns:
+        raise ValueError("Warehouse file must have a 'SKU#' or 'SKU' column.")
+
+    if "Stock_Qty" not in df.columns:
+        df["Stock_Qty"] = 0
+    df["Stock_Qty"] = _to_num(df["Stock_Qty"]).astype(int)
+
+    # Keep only rows with a SKU
+    df = df[df["SKU"].astype(str).str.strip().ne("")].reset_index(drop=True)
+
+    # ── Normalize SKU ─────────────────────────────────────────────────────
+    df["SKU_norm"] = df["SKU"].apply(normalize_sku)
+
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WAREHOUSE ↔ SHOPIFY MERGE  (normalized SKU join)
+# ══════════════════════════════════════════════════════════════════════════════
+def merge_warehouse_shopify(
+    wh_df: pd.DataFrame,
+    sh_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Join warehouse stock to Shopify inventory using normalized SKU.
+    Preserves original SKU columns for display; SKU_norm is only for matching.
+
+    Result columns added to sh_df:
+        WH_SKU        — original warehouse SKU string
+        WH_Stock      — warehouse Stock_Qty
+        WH_Brand      — brand from warehouse
+        WH_Desc       — description from warehouse
+        SKU_matched   — True if a warehouse row was found
+        SKU_exact     — True if original SKUs match exactly (case-insensitive)
+        Stock_Delta   — Shopify On_Hand minus Warehouse Stock_Qty
+    """
+    wh = wh_df[
+        ["SKU", "SKU_norm", "Stock_Qty"]
+        + [c for c in ["Brand", "Description"] if c in wh_df.columns]
+    ].copy().rename(columns={
+        "SKU":         "WH_SKU",
+        "Stock_Qty":   "WH_Stock",
+        "Brand":       "WH_Brand",
+        "Description": "WH_Desc",
+    })
+
+    merged = sh_df.merge(wh, on="SKU_norm", how="left")
+
+    merged["SKU_matched"] = merged["WH_Stock"].notna()
+    merged["SKU_exact"]   = (
+        merged["SKU"].astype(str).str.lower() ==
+        merged["WH_SKU"].astype(str).str.lower()
+    )
+    merged["WH_Stock"]    = merged["WH_Stock"].fillna(0).astype(int)
+    merged["Stock_Delta"] = merged["On_Hand"] - merged["WH_Stock"]
+
+    return merged
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INVENTORY BY SKU
+# ══════════════════════════════════════════════════════════════════════════════
 def inventory_by_sku(inv_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Consolidate inventory across all locations per SKU.
-    Returns one row per SKU with total and per-location breakdown.
-    """
     totals = inv_df.groupby("SKU").agg(
-        Title       = ("Title",     "first"),
-        Variant     = ("Variant",   "first"),
-        Total_OnHand  = ("On_Hand",    "sum"),
-        Total_Available = ("Available",  "sum"),
-        Total_Committed = ("Committed",  "sum"),
-        Total_Incoming  = ("Incoming",   "sum"),
+        Title           = ("Title",     "first"),
+        Variant         = ("Variant",   "first"),
+        Total_OnHand    = ("On_Hand",   "sum"),
+        Total_Available = ("Available", "sum"),
+        Total_Committed = ("Committed", "sum"),
+        Total_Incoming  = ("Incoming",  "sum"),
     ).reset_index()
 
-    # Per-location pivot for "where are the units"
     loc_pivot = inv_df.pivot_table(
-        index="SKU",
-        columns="Location",
-        values="On_Hand",
-        aggfunc="sum",
-        fill_value=0
+        index="SKU", columns="Location", values="On_Hand",
+        aggfunc="sum", fill_value=0,
     ).reset_index()
     loc_pivot.columns.name = None
 
-    result = totals.merge(loc_pivot, on="SKU", how="left")
-    return result
+    return totals.merge(loc_pivot, on="SKU", how="left")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ORDERS PARSER
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_orders(file) -> pd.DataFrame:
-    """
-    Parse the Shopify Orders Export.
-    Returns a clean DataFrame with one row per ORDER LINE ITEM.
-
-    Key columns in result:
-        Order_ID, Financial_Status, Fulfillment_Status,
-        Created_At, Fulfilled_At, SKU, Item_Name,
-        Qty_Ordered, Unit_Price, Line_Fulfillment,
-        Shipping_Method, Store_Location, Vendor, Total
-    """
-    raw = pd.read_csv(file) if isinstance(file, str) else pd.read_csv(file)
+    raw = _read_csv(file)
     df  = _rename_exact(raw, ORD_COLS)
 
-    # Parse timestamps
     for ts_col in ["Created_At", "Fulfilled_At", "Paid_At", "Cancelled_At"]:
         if ts_col in df.columns:
             df[ts_col] = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
 
-    # Numeric
     for num_col in ["Qty_Ordered", "Unit_Price", "Subtotal", "Total"]:
         if num_col in df.columns:
             df[num_col] = _to_num(df[num_col])
 
-    # Normalize status to lowercase for consistent filtering
     for s_col in ["Financial_Status", "Fulfillment_Status", "Line_Fulfillment"]:
         if s_col in df.columns:
             df[s_col] = df[s_col].fillna("").str.lower().str.strip()
 
-    # Clean SKU
     if "SKU" in df.columns:
         df["SKU"] = df["SKU"].astype(str).str.strip()
+
+    # ── Normalize SKU ─────────────────────────────────────────────────────
+    df["SKU_norm"] = df["SKU"].apply(normalize_sku)
 
     return df
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ORDERS SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
 def orders_summary(ord_df: pd.DataFrame) -> dict:
-    """
-    Compute order-level KPIs from the orders DataFrame.
-
-    Returns a dict with:
-        total_orders       — unique order count
-        fulfilled          — count shipped
-        unfulfilled        — paid but not yet started
-        partial            — partially shipped
-        pending_payment    — not paid yet
-        refunded           — refunded orders
-        cancelled          — cancelled orders
-        avg_processing_hrs — avg hours from creation to fulfillment (fulfilled orders)
-        min_processing_hrs
-        max_processing_hrs
-    """
-    # Deduplicate to order level for status counts
     orders = ord_df.drop_duplicates("Order_ID").copy()
     total  = len(orders)
 
@@ -247,7 +321,6 @@ def orders_summary(ord_df: pd.DataFrame) -> dict:
     refnd = orders["Financial_Status"].isin(["refunded", "partially_refunded"]).sum()
     canc  = orders["Cancelled_At"].notna().sum() if "Cancelled_At" in orders.columns else 0
 
-    # Processing time: Created_At → Fulfilled_At (fulfilled orders only)
     done = orders[
         (orders["Fulfillment_Status"] == "fulfilled") &
         orders["Fulfilled_At"].notna() &
@@ -255,10 +328,6 @@ def orders_summary(ord_df: pd.DataFrame) -> dict:
     ].copy()
     done["proc_hrs"] = (done["Fulfilled_At"] - done["Created_At"]).dt.total_seconds() / 3600
     done = done[done["proc_hrs"] > 0]
-
-    avg_hrs = round(done["proc_hrs"].mean(), 1) if len(done) else 0
-    min_hrs = round(done["proc_hrs"].min(),  1) if len(done) else 0
-    max_hrs = round(done["proc_hrs"].max(),  1) if len(done) else 0
 
     return {
         "total_orders":       total,
@@ -268,36 +337,28 @@ def orders_summary(ord_df: pd.DataFrame) -> dict:
         "pending_payment":    int(pend),
         "refunded":           int(refnd),
         "cancelled":          int(canc),
-        "avg_processing_hrs": avg_hrs,
-        "min_processing_hrs": min_hrs,
-        "max_processing_hrs": max_hrs,
+        "avg_processing_hrs": round(done["proc_hrs"].mean(), 1) if len(done) else 0,
+        "min_processing_hrs": round(done["proc_hrs"].min(),  1) if len(done) else 0,
+        "max_processing_hrs": round(done["proc_hrs"].max(),  1) if len(done) else 0,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FULFILLABILITY CHECK — Can inventory cover open orders?
+# FULFILLABILITY CHECK
 # ══════════════════════════════════════════════════════════════════════════════
 def check_fulfillability(ord_df: pd.DataFrame, inv_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    For each OPEN (unfulfilled / partial) order line item, check whether
-    the available inventory is sufficient to fulfill it.
-    Includes Incoming stock (Shopify internal transfers) in the available count.
-
-    Returns a DataFrame with columns:
-        Order_ID, SKU, Item_Name, Qty_Ordered,
-        Available_Stock, Incoming_Stock, Can_Fulfill, Gap
-    """
     open_lines = ord_df[
         ord_df["Fulfillment_Status"].isin(["unfulfilled", "partial", ""])
     ][["Order_ID","SKU","Item_Name","Qty_Ordered","Financial_Status"]].copy()
 
     open_lines["SKU"] = open_lines["SKU"].astype(str).str.strip()
-    open_lines = open_lines[open_lines["SKU"].ne("") & open_lines["SKU"].ne("nan") & open_lines["SKU"].notna()]
+    open_lines = open_lines[
+        open_lines["SKU"].ne("") & open_lines["SKU"].ne("nan") & open_lines["SKU"].notna()
+    ]
 
-    # Consolidated available + incoming per SKU
     stock = inv_df.groupby("SKU").agg(
-        Available_Stock=("Available","sum"),
-        Incoming_Stock =("Incoming", "sum"),
+        Available_Stock = ("Available", "sum"),
+        Incoming_Stock  = ("Incoming",  "sum"),
     ).reset_index()
 
     merged = open_lines.merge(stock, on="SKU", how="left")
@@ -311,21 +372,9 @@ def check_fulfillability(ord_df: pd.DataFrame, inv_df: pd.DataFrame) -> pd.DataF
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# INVENTORY MATCH — Shopify vs Warehouse (In Store / physical location)
+# INVENTORY MATCH — Shopify vs Warehouse
 # ══════════════════════════════════════════════════════════════════════════════
-def inventory_match(inv_df: pd.DataFrame,
-                    warehouse_location: str = "In Store") -> dict:
-    """
-    Compare Shopify 'On_Hand' stock vs a specific physical location.
-    In Enroute's case, 'In Store' is the physical warehouse location.
-
-    Returns:
-        match_pct         — % of SKUs where On_Hand == Available (exact match)
-        total_skus        — total SKUs evaluated
-        matched_skus      — SKUs that match exactly
-        discrepancy_skus  — SKUs with a difference
-        detail_df         — DataFrame with per-SKU comparison
-    """
+def inventory_match(inv_df: pd.DataFrame, warehouse_location: str = "In Store") -> dict:
     loc_df = inv_df[inv_df["Location"] == warehouse_location].copy()
 
     if loc_df.empty:
@@ -336,8 +385,6 @@ def inventory_match(inv_df: pd.DataFrame,
         }
 
     loc_df = loc_df[loc_df["SKU"].str.strip().ne("")]
-
-    # Group by SKU (in case of duplicates within same location)
     grp = loc_df.groupby("SKU").agg(
         Title     = ("Title",     "first"),
         Variant   = ("Variant",   "first"),
@@ -348,19 +395,16 @@ def inventory_match(inv_df: pd.DataFrame,
 
     grp["Difference"] = grp["On_Hand"] - grp["Available"]
     grp["Status"] = grp["Difference"].apply(
-        lambda d: "✅ Match" if d == 0 else ("🔴 Discrepancy" if d != 0 else "⚪ No Stock")
+        lambda d: "✅ Match" if d == 0 else "🔴 Discrepancy"
     )
-
-    # Override: both zero = no stock, not a real match for reporting
     grp.loc[(grp["On_Hand"] == 0) & (grp["Available"] == 0), "Status"] = "⚪ No Stock"
 
     total       = len(grp)
     matched     = (grp["Status"] == "✅ Match").sum()
     discrepancy = (grp["Status"] == "🔴 Discrepancy").sum()
     no_stock    = (grp["Status"] == "⚪ No Stock").sum()
-    active      = total - no_stock  # SKUs that actually have some stock to compare
-
-    match_pct = round((matched / active * 100), 1) if active > 0 else 0
+    active      = total - no_stock
+    match_pct   = round(matched / active * 100, 1) if active > 0 else 0
 
     return {
         "match_pct":        match_pct,
@@ -374,13 +418,11 @@ def inventory_match(inv_df: pd.DataFrame,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# QUICK VALIDATION — call this to verify files loaded correctly
+# VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
 def validate_inventory_file(df: pd.DataFrame) -> list[str]:
-    """Return list of warnings if required columns are missing or data looks wrong."""
     warnings = []
-    required = ["SKU", "Location", "Available", "On_Hand"]
-    for col in required:
+    for col in ["SKU", "Location", "Available", "On_Hand"]:
         if col not in df.columns:
             warnings.append(f"❌ Missing required column: '{col}'")
     if "SKU" in df.columns and df["SKU"].str.strip().eq("").all():
@@ -391,148 +433,19 @@ def validate_inventory_file(df: pd.DataFrame) -> list[str]:
 
 
 def validate_orders_file(df: pd.DataFrame) -> list[str]:
-    """Return list of warnings for orders file."""
     warnings = []
-    required = ["Order_ID", "Fulfillment_Status", "Created_At", "SKU", "Qty_Ordered"]
-    for col in required:
+    for col in ["Order_ID", "Fulfillment_Status", "Created_At", "SKU", "Qty_Ordered"]:
         if col not in df.columns:
             warnings.append(f"❌ Missing required column: '{col}'")
     return warnings
 
-# ══════════════════════════════════════════════════════════════════════════════
-# WAREHOUSE RECONCILIATION
-# ══════════════════════════════════════════════════════════════════════════════
-WH_COLS = {
-    "Location": "WH_Location", "Brand": "Brand", "Type": "Type",
-    "Description": "WH_Description", "Gender": "Gender", "Color": "Color",
-    "Size": "Size", "SKU#": "SKU", "Stock Qty": "WH_Qty",
-}
 
-def parse_warehouse(file) -> pd.DataFrame:
-    fname = getattr(file, "name", "")
-    raw = pd.read_csv(file) if fname.lower().endswith(".csv") else pd.read_excel(file)
-    col_map = {}
-    for wh_col, internal in WH_COLS.items():
-        for c in raw.columns:
-            if wh_col.lower() == c.lower().strip():
-                col_map[c] = internal; break
-        if internal not in col_map.values():
-            for c in raw.columns:
-                if wh_col.lower() in c.lower():
-                    col_map[c] = internal; break
-    df = raw.rename(columns=col_map)
-    keep = [v for v in WH_COLS.values() if v in df.columns]
-    df = df[keep].copy()
-    df["SKU"] = df["SKU"].astype(str).str.strip()
-    df = df[df["SKU"].ne("") & df["SKU"].ne("nan")].reset_index(drop=True)
-    if "WH_Qty" in df.columns:
-        df["WH_Qty"] = _to_num(df["WH_Qty"]).astype(int)
-    if "Gender" in df.columns:
-        _gmap = {
-            "m": "M", "men": "M", "mens": "M", "male": "M",
-            "man": "M", "hombre": "M", "caballero": "M", "h": "M",
-            "w": "W", "women": "W", "womens": "W", "female": "W",
-            "woman": "W", "mujer": "W", "dama": "W", "d": "W",
-            "u": "U", "unisex": "U",
-        }
-        df["Gender"] = (
-            df["Gender"]
-            .astype(str).str.strip().str.lower()
-            .str.replace(r"['\s]", "", regex=True)
-            .str.replace("'s", "", regex=False)
-            .map(_gmap)
-            .fillna("U")
-        )
-    return df
-
-# ── SKU normalization helpers ─────────────────────────────────────────────────
-
-def _ins_zero(s: str):
-    v = _re.sub(r'(?<=-)(\d)([\.,]\d)', r'0\1\2', s)
-    if v != s: return v
-    v = _re.sub(r'(?<=-)(\d)$', r'0\1', s)
-    return v if v != s else None
-
-def _ins_gender(s: str, gp: str):
-    if not gp: return None
-    m = _re.match(r'^(.*-)([^-]+)$', s)
-    return (m.group(1) + gp + m.group(2)) if m else None
-
-def _gender_prefix(gender_val: str) -> list:
-    v = str(gender_val).strip().lower().replace("'", "").replace("'s", "")
-    known = {
-        "m": ["M"], "men": ["M"], "mens": ["M"], "male": ["M"],
-        "hombre": ["M"], "man": ["M"], "caballero": ["M"], "h": ["M"],
-        "w": ["W"], "women": ["W"], "womens": ["W"], "female": ["W"],
-        "mujer": ["W"], "wmn": ["W"], "woman": ["W"], "dama": ["W"], "d": ["W"],
-        "u": ["M","W"], "unisex": ["M","W"], "uni": ["M","W"],
-    }
-    if v in known:
-        return known[v]
-    if v and v not in ("nan", "none", "", "n/a"):
-        return ["M", "W"]
-    return []
-
-def _sku_candidates(wh_sku: str, gender_val: str) -> list:
-    base     = wh_sku.strip()
-    variants = [base]
-    z = _ins_zero(base)
-    if z: variants.append(z)
-
-    prefixes = {"M": ["M"], "W": ["W"]}.get(gender_val, ["M", "W"])
-
-    all_cands = list(variants)
-    for gp in prefixes:
-        for s in variants:
-            g = _ins_gender(s, gp)
-            if g and g not in all_cands:
-                all_cands.append(g)
-
-    return all_cands
-
-
-def reconcile_warehouse(wh_df: pd.DataFrame, inv_df: pd.DataFrame,
-                         shopify_location: str = "Online") -> pd.DataFrame:
-    shop = inv_df[inv_df["Location"].str.strip().str.lower() == shopify_location.lower()]
-    shop_agg = shop.groupby("SKU").agg(
-        Title=("Title", "first"),
-        Shopify_OnHand=("On_Hand", "sum"),
-        Shopify_Available=("Available", "sum"),
-    ).reset_index()
-    shop_dict = shop_agg.set_index("SKU").to_dict("index")
-
-    agg_dict: dict = {"WH_Qty": ("WH_Qty", "sum")}
-    if "WH_Description" in wh_df.columns: agg_dict["WH_Desc"] = ("WH_Description", "first")
-    if "Gender"         in wh_df.columns: agg_dict["Gender"]  = ("Gender",          "first")
-    wh_agg = wh_df.groupby("SKU").agg(**agg_dict).reset_index()
-
-    rows = []
-    for _, row in wh_agg.iterrows():
-        wh_sku = row["SKU"]
-        gender = row.get("Gender", "") if "Gender" in wh_agg.columns else ""
-        cands  = _sku_candidates(wh_sku, str(gender))
-
-        matched_sku = next((c for c in cands if c in shop_dict), None)
-        s = shop_dict[matched_sku] if matched_sku else {}
-
-        rows.append({
-            "WH_SKU":            wh_sku,
-            "Shopify_SKU":       matched_sku or "—",
-            "Match_Type":        "Exact"      if matched_sku == wh_sku
-                             else "Normalized" if matched_sku
-                             else "Not Found",
-            "WH_Desc":           row.get("WH_Desc", ""),
-            "Title":             s.get("Title", ""),
-            "WH_Qty":            int(row["WH_Qty"]),
-            "Shopify_OnHand":    int(s.get("Shopify_OnHand", 0)),
-            "Shopify_Available": int(s.get("Shopify_Available", 0)),
-        })
-
-    df = pd.DataFrame(rows)
-    df["Delta"] = df["Shopify_OnHand"] - df["WH_Qty"]
-    df["Status"] = df.apply(lambda r:
-        "⚠️ Not Found" if r["Match_Type"] == "Not Found" else
-        ("✅ Match"        if r["Delta"] == 0  else
-        ("🔴 Shopify+"    if r["Delta"] >  0  else "🔵 WH+")), axis=1)
-
-    return df.sort_values("Delta", key=abs, ascending=False).reset_index(drop=True)
+def validate_warehouse_file(df: pd.DataFrame) -> list[str]:
+    warnings = []
+    if "SKU" not in df.columns:
+        warnings.append("❌ Missing required column: 'SKU#' or 'SKU'")
+    if "Stock_Qty" not in df.columns:
+        warnings.append("❌ Missing required column: 'Stock Qty' or 'Qty'")
+    if "SKU" in df.columns and df["SKU"].str.strip().eq("").all():
+        warnings.append("❌ All SKU values are empty")
+    return warnings
