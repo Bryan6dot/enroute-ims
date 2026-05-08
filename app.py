@@ -460,28 +460,48 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     )
     wh_with_stock = wh_agg[wh_agg["WH_Stock"] > 0]
 
-    # Three-way join: Shopify Online vs WH
-    merged = shopify_online_valued.merge(
-        wh_with_stock[["SKU_norm","WH_SKU","WH_Desc","WH_Brand","WH_Stock"]],
-        on="SKU_norm", how="outer", indicator=True
-    )
+    # ── Universe sets for correct group assignment ───────────────────────────
+    # "Exists in Shopify" = SKU appears in ANY location in inv_df (any qty)
+    # "Exists in WH"      = SKU appears in wh_agg (any stock qty, including 0)
+    all_shopify_norm = set(inv_df["SKU_norm"]) if inv_df is not None else set()
+    all_wh_norm      = set(wh_agg["SKU_norm"])
 
-    in_both      = merged[merged["_merge"] == "both"].copy()
-    shopify_only = merged[merged["_merge"] == "left_only"].copy()   # Shopify Online, not in WH
-    wh_only      = merged[merged["_merge"] == "right_only"].copy()  # WH stock, not in Shopify Online
+    # Shopify Online qty for ALL Shopify SKUs (0 if not stocked at Online)
+    online_by_sku = (
+        inv_df[inv_df["Location"] == "Online"]
+        .groupby("SKU_norm")["On_Hand"].sum()
+        .reset_index()
+        .rename(columns={"On_Hand": "Shopify_Online"})
+    ) if inv_df is not None else pd.DataFrame(columns=["SKU_norm","Shopify_Online"])
 
-    # Add SKU / Title to shopify_only from inv_df
+    # in_both = SKU exists in BOTH systems (inner join)
+    # Compare WH stock vs Shopify Online qty (0 if SKU has no Online stock)
+    in_both = wh_agg.merge(online_by_sku, on="SKU_norm", how="inner")
+    in_both["Shopify_Online"] = in_both["Shopify_Online"].fillna(0).astype(int)
+    in_both["WH_Stock"]       = in_both["WH_Stock"].fillna(0).astype(int)
+    in_both["Delta"]          = in_both["WH_Stock"] - in_both["Shopify_Online"]
+
+    # Add SKU / Title metadata
     if inv_df is not None:
         sku_meta = inv_df.groupby("SKU_norm").agg(
             SKU=("SKU","first"), Title=("Title","first")
         ).reset_index()
+        in_both = in_both.merge(sku_meta, on="SKU_norm", how="left")
+
+    # wh_only = WH stock > 0 AND SKU does NOT exist anywhere in Shopify
+    wh_only = wh_agg[
+        (wh_agg["WH_Stock"] > 0) &
+        (~wh_agg["SKU_norm"].isin(all_shopify_norm))
+    ].copy()
+
+    # shopify_only = Shopify Online > 0 AND SKU does NOT exist in WH at all
+    shopify_only = shopify_online_valued[
+        ~shopify_online_valued["SKU_norm"].isin(all_wh_norm)
+    ].copy()
+    if inv_df is not None:
         shopify_only = shopify_only.merge(sku_meta, on="SKU_norm", how="left")
 
-    # Discrepancy in matched
-    in_both["WH_Stock"]      = in_both["WH_Stock"].fillna(0).astype(int)
-    in_both["Shopify_Online"] = in_both["Shopify_Online"].fillna(0).astype(int)
-    in_both["Delta"]         = in_both["WH_Stock"] - in_both["Shopify_Online"]
-
+    # Core accuracy metrics
     exact_match   = int((in_both["Delta"] == 0).sum())
     wh_higher     = int((in_both["Delta"] >  0).sum())
     wh_lower      = int((in_both["Delta"] <  0).sum())
