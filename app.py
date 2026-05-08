@@ -26,8 +26,9 @@ try:
         cross_reference, _loc_stats,
     )
     ENGINE_OK = True
-except ImportError:
+except ImportError as _ie:
     ENGINE_OK = False
+    _import_error = str(_ie)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -168,11 +169,9 @@ if page == "📊 Dashboard":
                 st.session_state.ord_df = None
 
         STORE_DEFS = [("CC", "🚴 Cycling Store"), ("RR", "🏃 Running Store")]
-
         for store_code, store_label in STORE_DEFS:
             st.markdown(f"**{store_label} ({store_code})**")
             c1, c2, c3 = st.columns([5, 5, 1])
-
             with c1:
                 st.caption("Inventory Export — Admin → Products → Inventory → Export")
                 inv_file = st.file_uploader(
@@ -193,7 +192,6 @@ if page == "📊 Dashboard":
                 elif store_code in st.session_state.inv_store:
                     n = st.session_state.inv_store[store_code]["SKU"].nunique()
                     st.success(f"✅ Loaded — {n:,} SKUs")
-
             with c2:
                 st.caption("Orders Export — Admin → Orders → Export")
                 ord_file = st.file_uploader(
@@ -214,19 +212,16 @@ if page == "📊 Dashboard":
                 elif store_code in st.session_state.ord_store:
                     o = st.session_state.ord_store[store_code]["Order_ID"].nunique()
                     st.success(f"✅ Loaded — {o:,} orders")
-
             with c3:
                 st.caption(" ")
                 has_data = (store_code in st.session_state.inv_store
                             or store_code in st.session_state.ord_store)
                 if st.button("🗑", key=f"clear_{store_code}",
-                             help=f"Clear {store_code} data",
-                             disabled=not has_data):
+                             help=f"Clear {store_code} data", disabled=not has_data):
                     st.session_state.inv_store.pop(store_code, None)
                     st.session_state.ord_store.pop(store_code, None)
                     _rebuild_combined()
                     st.rerun()
-
             st.divider()
 
     # ── Warehouse file upload ─────────────────────────────────────────────
@@ -241,8 +236,7 @@ if page == "📊 Dashboard":
             try:
                 wh_parsed = parse_warehouse(wh_file)
                 warns = validate_warehouse_file(wh_parsed)
-                for w in warns:
-                    st.warning(w)
+                for w in warns: st.warning(w)
                 if not warns:
                     st.session_state.wh_df = wh_parsed
                     st.success(
@@ -253,361 +247,117 @@ if page == "📊 Dashboard":
                 st.error(f"Error reading warehouse file: {e}")
         elif st.session_state.wh_df is not None:
             wh = st.session_state.wh_df
-            st.success(
-                f"✅ Loaded — {wh['SKU'].nunique():,} SKUs · "
-                f"{int(wh['Stock_Qty'].sum()):,} total units"
-            )
+            st.success(f"✅ Loaded — {wh['SKU'].nunique():,} SKUs · {int(wh['Stock_Qty'].sum()):,} total units")
         if st.session_state.wh_df is not None:
             if st.button("🗑 Clear warehouse file", key="clear_wh"):
                 st.session_state.wh_df = None
                 st.rerun()
 
     inv_df = st.session_state.inv_df
-    ord_df = st.session_state.ord_df
-
-    if inv_df is None and ord_df is None:
-        st.info("Upload at least one Shopify file above to see the dashboard.")
+    if inv_df is None:
+        st.info("Upload at least one Shopify inventory file above to see the dashboard.")
         st.stop()
 
-    # ── Store filter ──────────────────────────────────────────────────────
-    loaded_stores = list(st.session_state.inv_store.keys() or st.session_state.ord_store.keys())
+    # Store filter
+    loaded_stores = list(st.session_state.inv_store.keys())
     STORE_LABELS  = {"CC": "🚴 Cycling (CC)", "RR": "🏃 Running (RR)"}
-    store_options = ["All Stores"] + [STORE_LABELS.get(s, s) for s in loaded_stores]
-    store_code_map = {STORE_LABELS.get(s, s): s for s in loaded_stores}
-
     if len(loaded_stores) > 1:
-        sel_store_label = st.selectbox("📍 View store", store_options, key="dash_store_filter")
+        sel_store_label = st.selectbox(
+            "📍 View store",
+            ["All Stores"] + [STORE_LABELS.get(s, s) for s in loaded_stores],
+            key="dash_store_filter"
+        )
+        store_code_map = {STORE_LABELS.get(s, s): s for s in loaded_stores}
         sel_store = store_code_map.get(sel_store_label)
     else:
         sel_store = loaded_stores[0] if loaded_stores else None
 
     def _filter_store(df, store_code):
-        if df is None or store_code is None:
-            return df
+        if df is None or store_code is None: return df
         return df[df["Store"] == store_code].copy() if "Store" in df.columns else df
 
     inv_view = _filter_store(inv_df, sel_store) if sel_store else inv_df
-    ord_view = _filter_store(ord_df, sel_store) if sel_store else ord_df
 
-    # ── Warehouse cross-reference ─────────────────────────────────────────
-    if st.session_state.wh_df is not None:
-        st.divider()
-        st.markdown("### 🔀 Warehouse ↔ Shopify Cross-Reference")
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 1 — INVENTORY STORE COMPARISON  (HTML card widget)
+    # ══════════════════════════════════════════════════════════════════════
+    inv_cc = st.session_state.inv_store.get("CC")
+    inv_rr = st.session_state.inv_store.get("RR")
 
-        xref = cross_reference(
-            wh_df=st.session_state.wh_df,
-            cc_df=st.session_state.inv_store.get("CC"),
-            rr_df=st.session_state.inv_store.get("RR"),
-        )
-        s = xref["summary"]
+    def _inv_stats(df):
+        if df is None or len(df) == 0:
+            return {"skus": 0, "on_hand": 0, "stockouts": 0,
+                    "available": 0, "committed": 0}
+        sku_total = df.groupby("SKU")["On_Hand"].sum()
+        active    = sku_total[sku_total > 0]
+        return {
+            "skus":      int(len(active)),
+            "on_hand":   int(df["On_Hand"].sum()),
+            "available": int(df["Available"].sum()),
+            "committed": int(df["Committed"].sum()),
+            "stockouts": int((sku_total == 0).sum()),
+        }
 
-        st.caption("SHOPIFY — SKUs with On Hand > 0 (any location)")
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("CC valued SKUs",         f"{s['shopify_cc_skus_valued']:,}")
-        k2.metric("RR valued SKUs",         f"{s['shopify_rr_skus_valued']:,}")
-        k3.metric("Combined valued SKUs",   f"{s['shopify_total_valued']:,}")
-        k4.metric("Total units (all locs)", f"{s['shopify_total_units']:,}")
-        k5.metric("Units in Online loc",    f"{s['shopify_online_units']:,}",
-                  help="'Online' = shared warehouse location in Shopify")
+    cc_s = _inv_stats(inv_cc)
+    rr_s = _inv_stats(inv_rr)
 
-        st.divider()
-        st.caption("WAREHOUSE MASTER FILE")
-        w1, w2, w3 = st.columns(3)
-        w1.metric("Total SKUs in file",   f"{s['wh_total_skus']:,}")
-        w2.metric("SKUs with stock > 0",  f"{s['wh_skus_with_stock']:,}")
-        w3.metric("Total physical units", f"{s['wh_total_units']:,}")
-
-        st.divider()
-        st.caption("CROSS-REFERENCE RESULTS")
-        c1, c2, c3 = st.columns(3)
-        c1.metric(
-            "✅ In both Shopify & WH",
-            f"{s['matched_skus']:,}",
-            help="SKUs with On_Hand > 0 in Shopify AND present in warehouse file",
-        )
-        c2.metric(
-            "⚠️ Shopify only",
-            f"{s['shopify_only_skus']:,}",
-            help="Shopify has stock but SKU is missing from warehouse master file",
-            delta=f"-{s['shopify_only_skus']:,}" if s['shopify_only_skus'] else None,
-            delta_color="inverse",
-        )
-        c3.metric(
-            "🏭 Warehouse only",
-            f"{s['wh_only_skus']:,}",
-            help="Warehouse has stock > 0 but SKU has no On_Hand in Shopify",
-            delta=f"-{s['wh_only_skus']:,}" if s['wh_only_skus'] else None,
-            delta_color="inverse",
-        )
-
-        st.caption("DISCREPANCY (matched SKUs) — WH Stock vs Shopify Online units")
-        d1, d2, d3 = st.columns(3)
-        d1.metric("✅ Exact match",  f"{s['delta_exact']:,}")
-        d2.metric("⬆ WH > Shopify", f"{s['delta_wh_higher']:,}")
-        d3.metric("⬇ WH < Shopify", f"{s['delta_wh_lower']:,}", delta_color="inverse")
-
-        st.divider()
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            with st.expander(f"🔍 {s['matched_skus']:,} matched SKUs — discrepancy detail"):
-                st.dataframe(xref["matched"], use_container_width=True, hide_index=True)
-        with col_b:
-            with st.expander(f"⚠️ {s['shopify_only_skus']:,} Shopify-only SKUs"):
-                st.caption("Have On_Hand in Shopify but absent from warehouse master file.")
-                st.dataframe(xref["shopify_only"], use_container_width=True, hide_index=True)
-        with col_c:
-            with st.expander(f"🏭 {s['wh_only_skus']:,} Warehouse-only SKUs"):
-                st.caption("Have physical stock in warehouse but no On_Hand in Shopify.")
-                st.dataframe(xref["wh_only"], use_container_width=True, hide_index=True)
-
-    # ── Animated HTML dashboard ───────────────────────────────────────────
-    def _build_dashboard_html(inv_cc, inv_rr, ord_cc, ord_rr, inv_view, ord_view):
-        def inv_stats(df, ord_df=None):
-            if df is None or len(df) == 0:
-                return {"skus":0,"on_hand":0,"stockouts":0,"available":0,"committed":0,
-                        "pct_with_mov":0,"pct_no_mov":0,"n_with_mov":0,"n_no_mov":0}
-            sku_total = df.groupby("SKU")["On_Hand"].sum()
-            active = sku_total[sku_total > 0].index.tolist()
-            n_active = len(active)
-            if ord_df is not None and n_active:
-                ord_skus = set(ord_df["SKU"].astype(str).str.strip().dropna())
-                ord_skus.discard(""); ord_skus.discard("nan")
-                n_with = len([s for s in active if s in ord_skus])
-                n_no   = n_active - n_with
-            else:
-                n_with = n_no = 0
-            return {
-                "skus":        int(n_active),
-                "on_hand":     int(df["On_Hand"].sum()),
-                "available":   int(df["Available"].sum()),
-                "committed":   int(df["Committed"].sum()),
-                "stockouts":   int((sku_total == 0).sum()),
-                "n_with_mov":  n_with,
-                "n_no_mov":    n_no,
-                "pct_with_mov": round(n_with/n_active*100,1) if n_active else 0,
-                "pct_no_mov":   round(n_no/n_active*100,1) if n_active else 0,
-            }
-
-        def fulf_stats(ord_df, inv_df):
-            if ord_df is None or inv_df is None:
-                return {"total":0,"can":0,"cannot":0,"pct":0,"gap":0}
-            f = check_fulfillability(ord_df, inv_df)
-            can = int(f["Can_Fulfill"].sum())
-            tot = len(f)
-            return {"total":tot,"can":can,"cannot":tot-can,
-                    "pct":round(can/tot*100,1) if tot else 0,"gap":int(f["Gap"].sum())}
-
-        cc  = inv_stats(inv_cc, ord_cc)
-        rr  = inv_stats(inv_rr, ord_rr)
-        fc_cc = fulf_stats(ord_cc, inv_cc)
-        fc_rr = fulf_stats(ord_rr, inv_rr)
-        oc    = orders_summary(ord_cc) if ord_cc is not None else {}
-        orr_s = orders_summary(ord_rr) if ord_rr is not None else {}
-
-        def _avg_wait(d):
-            if d is None: return 0.0
-            sub = d[d["Fulfillment_Status"].isin(["unfulfilled","partial"])].drop_duplicates("Order_ID")
-            if sub.empty: return 0.0
-            return round((pd.Timestamp.now(tz="UTC") - sub["Created_At"]).dt.total_seconds().div(86400).mean(), 1)
-
-        oc_wait  = _avg_wait(ord_cc)
-        orr_wait = _avg_wait(ord_rr)
-        oc_total  = oc.get("total_orders", 0)
-        orr_total = orr_s.get("total_orders", 0)
-
-        def loc_rows_html():
-            if inv_view is None: return ""
-            loc_df, grand = _loc_stats(inv_view)
-            if len(loc_df) == 0: return ""
-            def su(df, loc):
-                if df is None: return 0
-                return int(df[df["Location"]==loc]["On_Hand"].sum())
-            html = ""
-            for _, row in loc_df.iterrows():
-                loc  = row["Location"]
-                cc_u = su(inv_cc, loc); rr_u = su(inv_rr, loc)
-                tot_u = cc_u + rr_u
-                cp = round(cc_u/tot_u*100) if tot_u else 0
-                rp = 100 - cp
-                html += (
-                    f'<div class="loc-card">'
-                    f'<div class="loc-name">{loc}</div>'
-                    f'<div class="loc-pct">{row["pct_total"]:.1f}%</div>'
-                    f'<div class="loc-split-bar">'
-                    f'<div class="lsb-cc" style="width:{cp}%;"></div>'
-                    f'<div class="lsb-rr" style="width:{rp}%;"></div>'
-                    f'</div>'
-                    f'<div class="loc-meta"><span>CC {cc_u:,}</span><span>RR {rr_u:,}</span></div>'
-                    f'<div class="loc-detail">Avail {row["pct_available"]:.1f}% &middot; Commit {row["pct_committed"]:.1f}%</div>'
-                    f'</div>'
-                )
-            return html
-
-        pos_transit   = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
-        pos_arrived   = [p for p in st.session_state.pos if p.get("status")=="Arrived"]
-        pos_completed = [p for p in st.session_state.pos if p.get("status")=="Completed"]
-
-        po_proc_times = []
-        for p in pos_completed:
-            try:
-                arr = datetime.strptime(p["arrived_at"],   "%Y-%m-%d %H:%M")
-                cmp = datetime.strptime(p["completed_at"], "%Y-%m-%d %H:%M")
-                hrs = (cmp - arr).total_seconds() / 3600
-                if hrs >= 0: po_proc_times.append(hrs)
-            except: pass
-        po_avg_hrs = round(sum(po_proc_times)/len(po_proc_times), 1) if po_proc_times else 0
-
-        n_po_transit   = len(pos_transit)
-        n_po_arrived   = len(pos_arrived)
-        n_po_completed = len(pos_completed)
-
-        transit_qty = {}
-        for p in pos_transit:
-            for s in p.get("skus",[]):
-                k = s["sku"].strip().upper()
-                transit_qty[k] = transit_qty.get(k,0) + int(s.get("qty",0))
-
-        n_transit_full = 0; n_transit_partial = 0; transit_units_coming = 0
-        n_transit_open_orders = 0; gap_combined = 0
-        total_lines_combined = 0; can_combined = 0
-        if inv_view is not None and ord_view is not None:
-            fulf_all = check_fulfillability(ord_view, inv_view)
-            total_lines_combined = len(fulf_all)
-            can_combined = int(fulf_all["Can_Fulfill"].sum())
-            gap_combined = int(fulf_all["Gap"].sum())
-            if transit_qty:
-                cant_all = fulf_all[~fulf_all["Can_Fulfill"]].copy()
-                cant_all["_up"] = cant_all["SKU"].astype(str).str.strip().str.upper()
-                cant_all["_t"]   = cant_all["_up"].map(lambda k: transit_qty.get(k,0))
-                n_transit_full    = int((cant_all["_t"] >= cant_all["Gap"]).sum())
-                n_transit_partial = int(((cant_all["_t"] > 0) & (cant_all["_t"] < cant_all["Gap"])).sum())
-                transit_units_coming = int(cant_all[cant_all["_t"] > 0]["_t"].sum())
-                all_open = fulf_all.copy()
-                all_open["_up"] = all_open["SKU"].astype(str).str.strip().str.upper()
-                n_transit_open_orders = int((all_open["_up"].map(
-                    lambda k: transit_qty.get(k,0)) > 0).sum())
-
-        cannot_combined = total_lines_combined - can_combined
-        pct_can = round(can_combined/total_lines_combined*100,1) if total_lines_combined else 0
-        loc_html = loc_rows_html()
-
-        # Fulfillable stock source breakdown
-        total_units_needed = units_from_available = units_from_incoming = 0
-        total_onhand_in_can = total_committed_in_can = total_av_in_can = 0
-        loc_badges_html = ""; oldest_open_days = 0; pct_units_available = 0
-        if inv_view is not None and ord_view is not None and can_combined > 0:
-            _fulf_can = check_fulfillability(ord_view, inv_view)
-            _can_rows = _fulf_can[_fulf_can["Can_Fulfill"]].copy()
-            _stock_src = inv_view.groupby("SKU").agg(
-                _av =("Available","sum"), _inc=("Incoming","sum"),
-                _oh =("On_Hand",  "sum"), _com=("Committed","sum"),
-            ).reset_index()
-            _can_rows = _can_rows.merge(_stock_src, on="SKU", how="left").fillna(0)
-            total_units_needed   = int(_can_rows["Qty_Ordered"].sum())
-            _can_rows["_used_av"]  = _can_rows[["Qty_Ordered","_av"]].min(axis=1).astype(int)
-            _can_rows["_used_inc"] = (_can_rows["Qty_Ordered"] - _can_rows["_used_av"]).clip(lower=0).astype(int)
-            units_from_available = int(_can_rows["_used_av"].sum())
-            units_from_incoming  = int(_can_rows["_used_inc"].sum())
-            total_onhand_in_can  = int(_can_rows["_oh"].sum())
-            total_committed_in_can = int(_can_rows["_com"].sum())
-            total_av_in_can      = int(_can_rows["_av"].sum())
-            pct_units_available  = round(units_from_available / total_units_needed * 100, 1) if total_units_needed else 0
-            _sbl = inv_view.groupby(["SKU","Location"])["Available"].sum().reset_index()
-            _sbl = _sbl[_sbl["Available"] > 0]
-            def _find_src(sku, qty):
-                locs = _sbl[_sbl["SKU"]==sku].sort_values("Available", ascending=False)
-                for _, r in locs.iterrows():
-                    if r["Available"] >= qty: return r["Location"]
-                return "Mix: " + " + ".join(locs["Location"].tolist()) if not locs.empty else "Unknown"
-            _can_rows["_qty"] = _can_rows["Qty_Ordered"].astype(float)
-            _can_rows["Source_Loc"] = _can_rows.apply(lambda r: _find_src(r["SKU"], r["_qty"]), axis=1)
-            _loc_counts = _can_rows["Source_Loc"].value_counts().to_dict()
-            _badge_colors = {"Online":"#111","In Store":"#1D9E75","Mix":"#BA7517",
-                             "Reserve Warehouse":"#185FA5","Enroute Richmond":"#533AB7","Reserve Instore":"#993556"}
-            def _bc(loc):
-                for k,v in _badge_colors.items():
-                    if k in loc: return v
-                return "#888"
-            loc_badges_html = "".join(
-                f'<span style="display:inline-flex;align-items:center;gap:4px;background:{_bc(loc)};'
-                f'color:#fff;font-size:11px;font-weight:500;padding:4px 10px;border-radius:20px;">'
-                f'{loc}&nbsp;<strong>{cnt}</strong></span>'
-                for loc, cnt in sorted(_loc_counts.items(), key=lambda x: -x[1])
+    def _loc_rows_html(inv_cc, inv_rr, inv_view):
+        if inv_view is None: return ""
+        loc_df, _ = _loc_stats(inv_view)
+        if loc_df.empty: return ""
+        def su(df, loc):
+            if df is None: return 0
+            return int(df[df["Location"] == loc]["On_Hand"].sum())
+        html = ""
+        for _, row in loc_df.iterrows():
+            loc   = row["Location"]
+            cc_u  = su(inv_cc, loc); rr_u = su(inv_rr, loc)
+            tot_u = cc_u + rr_u
+            cp = round(cc_u / tot_u * 100) if tot_u else 0
+            html += (
+                f'<div class="loc-card">'
+                f'<div class="loc-name">{loc}</div>'
+                f'<div class="loc-pct">{row["pct_total"]:.1f}%</div>'
+                f'<div class="loc-split-bar">'
+                f'<div class="lsb-cc" style="width:{cp}%;"></div>'
+                f'<div class="lsb-rr" style="width:{100-cp}%;"></div>'
+                f'</div>'
+                f'<div class="loc-meta"><span>CC {cc_u:,}</span><span>RR {rr_u:,}</span></div>'
+                f'<div class="loc-detail">Avail {row["pct_available"]:.1f}% · Commit {row["pct_committed"]:.1f}%</div>'
+                f'</div>'
             )
-            _now2 = pd.Timestamp.now(tz="UTC")
-            _open2 = ord_view[ord_view["Fulfillment_Status"].isin(["unfulfilled","partial",""])].drop_duplicates("Order_ID").copy()
-            oldest_open_days = round((_now2 - _open2["Created_At"]).dt.total_seconds().div(86400).max(), 1) if not _open2.empty else 0
+        return html
 
-        def pct_sub24(ord_df):
-            if ord_df is None: return 0.0
-            done = ord_df[(ord_df["Fulfillment_Status"]=="fulfilled") & ord_df["Fulfilled_At"].notna() & ord_df["Created_At"].notna()].copy()
-            done["hrs"] = (done["Fulfilled_At"] - done["Created_At"]).dt.total_seconds() / 3600
-            done = done[done["hrs"] >= 0]
-            return round((done["hrs"] < 24).sum() / len(done) * 100, 1) if len(done) else 0.0
+    loc_html = _loc_rows_html(inv_cc, inv_rr, inv_view)
 
-        cc_can=fc_cc["can"]; cc_can_not=fc_cc["cannot"]
-        rr_can=fc_rr["can"]; rr_can_not=fc_rr["cannot"]
-        cc_pct_v=fc_cc["pct"]; rr_pct_v=fc_rr["pct"]
-        cc_gap=fc_cc["gap"]; rr_gap=fc_rr["gap"]
-        cc_so=cc["stockouts"]; rr_so=rr["stockouts"]
-        cc_oh=cc["on_hand"];   rr_oh=rr["on_hand"]
-        cc_sk=cc["skus"];      rr_sk=rr["skus"]
-        oc_ful=oc.get("fulfilled",0); orr_ful=orr_s.get("fulfilled",0)
-        oc_unf=oc.get("unfulfilled",0); orr_unf=orr_s.get("unfulfilled",0)
-        oc_avg=oc.get("avg_processing_hrs",0); orr_avg=orr_s.get("avg_processing_hrs",0)
-        oc_total_v=oc_total; orr_total_v=orr_total
-        oc_fp=round(oc_ful/oc_total*100,1) if oc_total else 0
-        orr_fp=round(orr_ful/orr_total*100,1) if orr_total else 0
-        p100=round(100-pct_can,1)
-        cc_pct_with_mov=cc["pct_with_mov"]; cc_n_with_mov=cc["n_with_mov"]
-        cc_pct_no_mov=cc["pct_no_mov"];     cc_n_no_mov=cc["n_no_mov"]
-        rr_pct_with_mov=rr["pct_with_mov"]; rr_n_with_mov=rr["n_with_mov"]
-        rr_pct_no_mov=rr["pct_no_mov"];     rr_n_no_mov=rr["n_no_mov"]
-        oc_sub24=pct_sub24(ord_cc); orr_sub24=pct_sub24(ord_rr)
-        oc_wt=oc_wait; orr_wt=orr_wait
-
-        css = """*{box-sizing:border-box;margin:0;padding:0;}
+    css_store = """
+*{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:transparent;color:#111;}
-.dash{padding:4px 0 32px;}
+.wrap{padding:4px 0 8px;}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
-.store-card,.combined,.order-card,.fulfill-section{background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:16px;}
-.combined,.fulfill-section{margin-bottom:14px;}
-.order-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
+.card{background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:16px;}
 @media(prefers-color-scheme:dark){
   body{color:#f0f0f0;}
-  .store-card,.combined,.order-card,.fulfill-section{background:#1a1a1a;border-color:#2e2e2e;}
-  .kpi-box,.fc-box{background:#242424;}
-  .loc-card{border-color:#2e2e2e;background:#1a1a1a;}
-  .proc-row{border-color:#2e2e2e;}
-  .divider{background:#2e2e2e;}
-  .leg-val{color:#f0f0f0;}
+  .card{background:#1a1a1a;border-color:#2e2e2e;}
+  .kpi-box{background:#242424!important;}
+  .loc-card{background:#1a1a1a;border-color:#2e2e2e;}
 }
 .store-hdr{display:flex;align-items:center;gap:8px;margin-bottom:12px;}
-.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;letter-spacing:.04em;}
+.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;}
 .badge-cc{background:#111;color:#fff;}
 .badge-rr{background:#E24B4A;color:#fff;}
 .store-name{font-size:13px;font-weight:500;}
-.kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;}
+.kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
 .kpi-box{background:#f5f5f5;border-radius:8px;padding:10px 12px;}
-.kpi-lbl{font-size:10px;color:#888;margin-bottom:3px;letter-spacing:.03em;}
+.kpi-lbl{font-size:10px;color:#888;margin-bottom:3px;}
 .kpi-val{font-size:18px;font-weight:500;}
-.kpi-sub{font-size:10px;margin-top:1px;}
-.kpi-sub.up{color:#1D9E75;}
-.pie-lbl-txt{font-size:11px;color:#888;margin-bottom:6px;}
-.pie-section{display:flex;align-items:center;gap:10px;}
-.donut-wrap{position:relative;width:72px;height:72px;flex-shrink:0;}
-.donut-center{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;}
-.legend{display:flex;flex-direction:column;gap:5px;}
-.leg-item{display:flex;align-items:center;gap:6px;font-size:11px;color:#888;}
-.leg-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
-.leg-val{margin-left:auto;font-weight:500;font-size:11px;color:#111;}
 .sec-lbl{font-size:10px;letter-spacing:.08em;color:#aaa;text-transform:uppercase;margin-bottom:10px;}
 .combined-hdr{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px;}
 .combined-title{font-size:13px;font-weight:500;}
 .combined-sub{font-size:11px;color:#888;}
 .loc-legend{display:flex;gap:12px;font-size:11px;color:#888;}
 .ll-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:3px;}
-.loc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;}
+.loc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;}
 .loc-card{border:1px solid #e5e5e5;border-radius:8px;padding:10px 12px;}
 .loc-name{font-size:10px;color:#888;margin-bottom:4px;}
 .loc-pct{font-size:19px;font-weight:500;}
@@ -616,345 +366,338 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .lsb-rr{height:100%;background:#E24B4A;}
 .loc-meta{display:flex;justify-content:space-between;font-size:10px;color:#888;}
 .loc-detail{font-size:10px;color:#aaa;margin-top:4px;}
-.proc-row{display:flex;gap:14px;border-top:1px solid #f0f0f0;padding-top:10px;margin-top:10px;}
-.p-lbl{font-size:10px;color:#aaa;}
-.p-val{font-size:15px;font-weight:500;}
-.fc-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;}
-.fc-box{background:#f5f5f5;border-radius:8px;padding:10px 12px;}
-.fc-lbl{font-size:10px;color:#888;margin-bottom:3px;}
-.fc-val{font-size:18px;font-weight:500;}
-.fc-sub{font-size:10px;margin-top:1px;}
-@media(prefers-color-scheme:dark){.po-kpi{background:#1a1a1a!important;border-color:#2e2e2e!important;}}"""
+"""
 
-        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>{css}</style></head><body>
-<div class="dash">
+    html_store = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>{css_store}</style></head><body><div class="wrap">
 <div class="sec-lbl">Inventory — store comparison</div>
 <div class="split">
-<div class="store-card">
+<div class="card">
   <div class="store-hdr"><span class="badge badge-cc">CC</span><span class="store-name">Cycling Store</span></div>
   <div class="kpi-row">
-    <div class="kpi-box"><div class="kpi-lbl">SKUs w/ stock</div><div class="kpi-val">{cc_sk:,}</div></div>
-    <div class="kpi-box"><div class="kpi-lbl">On Hand</div><div class="kpi-val">{cc_oh:,}</div></div>
-    <div class="kpi-box"><div class="kpi-lbl">Stockouts</div><div class="kpi-val" style="color:#E24B4A;">{cc_so:,}</div></div>
-  </div>
-  <div style="display:flex;gap:6px;margin-bottom:10px;">
-    <div style="flex:1;background:#f5f5f5;border-radius:6px;padding:7px 10px;">
-      <div style="font-size:10px;color:#888;margin-bottom:2px;">With movement</div>
-      <div style="font-size:16px;font-weight:500;color:#1D9E75;">{cc_pct_with_mov}%</div>
-      <div style="font-size:10px;color:#888;">{cc_n_with_mov:,} SKUs</div>
-    </div>
-    <div style="flex:1;background:#f5f5f5;border-radius:6px;padding:7px 10px;">
-      <div style="font-size:10px;color:#888;margin-bottom:2px;">No movement</div>
-      <div style="font-size:16px;font-weight:500;color:#E24B4A;">{cc_pct_no_mov}%</div>
-      <div style="font-size:10px;color:#888;">{cc_n_no_mov:,} SKUs</div>
-    </div>
-  </div>
-  <div class="pie-lbl-txt">Fulfillability — open orders</div>
-  <div class="pie-section">
-    <div class="donut-wrap"><canvas id="pieCC" width="72" height="72"></canvas><div class="donut-center">{cc_pct_v:.0f}%</div></div>
-    <div class="legend">
-      <div class="leg-item"><div class="leg-dot" style="background:#111;"></div><span>Can fulfill</span><span class="leg-val">{cc_can:,}</span></div>
-      <div class="leg-item"><div class="leg-dot" style="background:#E24B4A;"></div><span>Short</span><span class="leg-val">{cc_can_not:,}</span></div>
-      <div class="leg-item"><div class="leg-dot" style="background:#ccc;"></div><span>Gap (units)</span><span class="leg-val">{cc_gap:,}</span></div>
-    </div>
+    <div class="kpi-box"><div class="kpi-lbl">SKUs w/ stock</div><div class="kpi-val">{cc_s["skus"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">On Hand</div><div class="kpi-val">{cc_s["on_hand"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Stockouts</div><div class="kpi-val" style="color:#E24B4A;">{cc_s["stockouts"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Available</div><div class="kpi-val" style="color:#1D9E75;">{cc_s["available"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Committed</div><div class="kpi-val">{cc_s["committed"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Avail %</div><div class="kpi-val">{round(cc_s["available"]/cc_s["on_hand"]*100) if cc_s["on_hand"] else 0}%</div></div>
   </div>
 </div>
-<div class="store-card">
+<div class="card">
   <div class="store-hdr"><span class="badge badge-rr">RR</span><span class="store-name">Running Store</span></div>
   <div class="kpi-row">
-    <div class="kpi-box"><div class="kpi-lbl">SKUs w/ stock</div><div class="kpi-val">{rr_sk:,}</div></div>
-    <div class="kpi-box"><div class="kpi-lbl">On Hand</div><div class="kpi-val">{rr_oh:,}</div></div>
-    <div class="kpi-box"><div class="kpi-lbl">Stockouts</div><div class="kpi-val" style="color:#E24B4A;">{rr_so:,}</div></div>
-  </div>
-  <div style="display:flex;gap:6px;margin-bottom:10px;">
-    <div style="flex:1;background:#f5f5f5;border-radius:6px;padding:7px 10px;">
-      <div style="font-size:10px;color:#888;margin-bottom:2px;">With movement</div>
-      <div style="font-size:16px;font-weight:500;color:#1D9E75;">{rr_pct_with_mov}%</div>
-      <div style="font-size:10px;color:#888;">{rr_n_with_mov:,} SKUs</div>
-    </div>
-    <div style="flex:1;background:#f5f5f5;border-radius:6px;padding:7px 10px;">
-      <div style="font-size:10px;color:#888;margin-bottom:2px;">No movement</div>
-      <div style="font-size:16px;font-weight:500;color:#E24B4A;">{rr_pct_no_mov}%</div>
-      <div style="font-size:10px;color:#888;">{rr_n_no_mov:,} SKUs</div>
-    </div>
-  </div>
-  <div class="pie-lbl-txt">Fulfillability — open orders</div>
-  <div class="pie-section">
-    <div class="donut-wrap"><canvas id="pieRR" width="72" height="72"></canvas><div class="donut-center">{rr_pct_v:.0f}%</div></div>
-    <div class="legend">
-      <div class="leg-item"><div class="leg-dot" style="background:#E24B4A;"></div><span>Can fulfill</span><span class="leg-val">{rr_can:,}</span></div>
-      <div class="leg-item"><div class="leg-dot" style="background:#f5a5a5;"></div><span>Short</span><span class="leg-val">{rr_can_not:,}</span></div>
-      <div class="leg-item"><div class="leg-dot" style="background:#ccc;"></div><span>Gap (units)</span><span class="leg-val">{rr_gap:,}</span></div>
-    </div>
+    <div class="kpi-box"><div class="kpi-lbl">SKUs w/ stock</div><div class="kpi-val">{rr_s["skus"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">On Hand</div><div class="kpi-val">{rr_s["on_hand"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Stockouts</div><div class="kpi-val" style="color:#E24B4A;">{rr_s["stockouts"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Available</div><div class="kpi-val" style="color:#1D9E75;">{rr_s["available"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Committed</div><div class="kpi-val">{rr_s["committed"]:,}</div></div>
+    <div class="kpi-box"><div class="kpi-lbl">Avail %</div><div class="kpi-val">{round(rr_s["available"]/rr_s["on_hand"]*100) if rr_s["on_hand"] else 0}%</div></div>
   </div>
 </div>
 </div>
-<div class="combined">
+<div class="card">
   <div class="combined-hdr">
     <div><div class="combined-title">Inventory by location</div><div class="combined-sub">CC vs RR split per location</div></div>
-    <div class="loc-legend"><span><span class="ll-dot" style="background:#111;"></span>CC</span><span><span class="ll-dot" style="background:#E24B4A;"></span>RR</span></div>
+    <div class="loc-legend">
+      <span><span class="ll-dot" style="background:#111;"></span>CC</span>
+      <span><span class="ll-dot" style="background:#E24B4A;"></span>RR</span>
+    </div>
   </div>
   <div class="loc-grid">{loc_html}</div>
 </div>
-<div class="sec-lbl">Purchase orders — receiving status</div>
-<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;">
-  <div class="po-kpi" style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px 14px;">
-    <div style="font-size:10px;color:#888;margin-bottom:3px;">In Transit</div>
-    <div style="font-size:22px;font-weight:500;">{n_po_transit}</div>
-    <div style="font-size:10px;color:#aaa;margin-top:2px;">shipments expected</div>
-  </div>
-  <div class="po-kpi" style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px 14px;">
-    <div style="font-size:10px;color:#888;margin-bottom:3px;">Arrived</div>
-    <div style="font-size:22px;font-weight:500;color:#BA7517;">{n_po_arrived}</div>
-    <div style="font-size:10px;color:#aaa;margin-top:2px;">waiting to be entered</div>
-  </div>
-  <div class="po-kpi" style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px 14px;">
-    <div style="font-size:10px;color:#888;margin-bottom:3px;">Completed</div>
-    <div style="font-size:22px;font-weight:500;color:#1D9E75;">{n_po_completed}</div>
-    <div style="font-size:10px;color:#aaa;margin-top:2px;">entered in Shopify</div>
-  </div>
-  <div class="po-kpi" style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px 14px;">
-    <div style="font-size:10px;color:#888;margin-bottom:3px;">Avg receive → complete</div>
-    <div style="font-size:22px;font-weight:500;">{po_avg_hrs} hrs</div>
-    <div style="font-size:10px;color:#aaa;margin-top:2px;">arrived to Shopify entry</div>
-  </div>
-</div>
-<div class="sec-lbl">Orders — store comparison</div>
-<div class="order-row">
-<div class="order-card">
-  <div class="store-hdr"><span class="badge badge-cc">CC</span><span class="store-name">Cycling orders</span></div>
-  <div class="kpi-row">
-    <div class="kpi-box"><div class="kpi-lbl">Total</div><div class="kpi-val">{oc_total_v:,}</div></div>
-    <div class="kpi-box"><div class="kpi-lbl">Fulfilled</div><div class="kpi-val">{oc_ful:,}</div><div class="kpi-sub up">{oc_fp}%</div></div>
-    <div class="kpi-box"><div class="kpi-lbl">Unfulfilled</div><div class="kpi-val" style="color:#E24B4A;">{oc_unf:,}</div></div>
-  </div>
-  <div class="proc-row">
-    <div><div class="p-lbl">Avg fulfillment</div><div class="p-val">{oc_avg} hrs</div></div>
-    <div><div class="p-lbl">Filled &lt;24 hrs</div><div class="p-val" style="color:#1D9E75;">{oc_sub24}%</div></div>
-    <div><div class="p-lbl">Avg wait (open)</div><div class="p-val" style="color:#E24B4A;">{oc_wt} days</div></div>
-  </div>
-</div>
-<div class="order-card">
-  <div class="store-hdr"><span class="badge badge-rr">RR</span><span class="store-name">Running orders</span></div>
-  <div class="kpi-row">
-    <div class="kpi-box"><div class="kpi-lbl">Total</div><div class="kpi-val">{orr_total_v:,}</div></div>
-    <div class="kpi-box"><div class="kpi-lbl">Fulfilled</div><div class="kpi-val">{orr_ful:,}</div><div class="kpi-sub up">{orr_fp}%</div></div>
-    <div class="kpi-box"><div class="kpi-lbl">Unfulfilled</div><div class="kpi-val" style="color:#E24B4A;">{orr_unf:,}</div></div>
-  </div>
-  <div class="proc-row">
-    <div><div class="p-lbl">Avg fulfillment</div><div class="p-val">{orr_avg} hrs</div></div>
-    <div><div class="p-lbl">Filled &lt;24 hrs</div><div class="p-val" style="color:#1D9E75;">{orr_sub24}%</div></div>
-    <div><div class="p-lbl">Avg wait (open)</div><div class="p-val" style="color:#E24B4A;">{orr_wt} days</div></div>
-  </div>
-</div>
-</div>
-<div class="fulfill-section">
-  <div class="sec-lbl" style="margin-bottom:10px;">Fulfillability — combined</div>
-  <div class="fc-row">
-    <div class="fc-box"><div class="fc-lbl">Open lines</div><div class="fc-val">{total_lines_combined:,}</div></div>
-    <div class="fc-box"><div class="fc-lbl">Stock sufficient</div><div class="fc-val" style="color:#1D9E75;">{can_combined:,}</div><div class="fc-sub" style="color:#1D9E75;">{pct_can}%</div></div>
-    <div class="fc-box"><div class="fc-lbl">Stock short</div><div class="fc-val" style="color:#E24B4A;">{cannot_combined:,} lines</div><div class="fc-sub" style="color:#E24B4A;">{gap_combined:,} units needed · {p100}%</div></div>
-    <div class="fc-box"><div class="fc-lbl">In transit (short lines)</div><div class="fc-val">{n_transit_full:,} full · {n_transit_partial:,} partial</div><div class="fc-sub" style="color:#888;">{transit_units_coming:,} units coming</div></div>
-  </div>
-  <div style="border-top:1px solid #f0f0f0;padding-top:10px;margin-top:2px;">
-    <div style="font-size:10px;color:#888;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Stock sufficient — {can_combined:,} lines · {total_units_needed:,} units · oldest open: {oldest_open_days} days</div>
-    <div style="margin-bottom:8px;">
-      <div style="font-size:11px;color:#555;margin-bottom:5px;font-weight:500;">Pick location</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;">{loc_badges_html}</div>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
-      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">On Hand — these SKUs</div>
-        <div style="font-size:17px;font-weight:500;">{total_onhand_in_can:,}</div>
-      </div>
-      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">Available — these SKUs</div>
-        <div style="font-size:17px;font-weight:500;">{total_av_in_can:,}</div>
-      </div>
-      <div style="padding:8px 10px;border-radius:6px;background:#f5f5f5;">
-        <div style="font-size:10px;color:#888;margin-bottom:3px;">Committed — these SKUs</div>
-        <div style="font-size:17px;font-weight:500;">{total_committed_in_can:,}</div>
-      </div>
-      <div style="padding:8px 10px;border-radius:6px;background:#f0faf5;">
-        <div style="font-size:10px;color:#0F6E56;margin-bottom:3px;">Units needed</div>
-        <div style="font-size:17px;font-weight:500;color:#0F6E56;">{total_units_needed:,}</div>
-        <div style="font-size:10px;color:#1D9E75;margin-top:1px;">{pct_units_available}% from Available</div>
-      </div>
-    </div>
-  </div>
-</div>
-</div>
-<script>
-var isDark=window.matchMedia('(prefers-color-scheme:dark)').matches;
-var bg=isDark?'rgba(255,255,255,.1)':'#e5e5e5';
-function drawDonut(id,pct,fill,bg,sz){{
-  var c=document.getElementById(id);if(!c)return;
-  sz=sz||72;var half=sz/2;
-  var ctx=c.getContext('2d'),cx=half,cy=half,r=half*0.77,lw=sz*0.097,start=-Math.PI/2,target=pct/100,t0=null;
-  function frame(now){{if(!t0)t0=now;var el=Math.min((now-t0)/900,1);
-    var prog=target*(el<.5?2*el*el:-1+(4-2*el)*el);
-    ctx.clearRect(0,0,sz,sz);
-    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.strokeStyle=bg;ctx.lineWidth=lw;ctx.stroke();
-    ctx.beginPath();ctx.arc(cx,cy,r,start,start+Math.PI*2*prog);ctx.strokeStyle=fill;ctx.lineWidth=lw;ctx.lineCap='round';ctx.stroke();
-    if(el<1)requestAnimationFrame(frame);}}
-  requestAnimationFrame(frame);
-}}
-drawDonut('pieCC',{cc_pct_v},isDark?'#ddd':'#111',bg);
-drawDonut('pieRR',{rr_pct_v},'#E24B4A',bg);
-</script></body></html>"""
+</div></body></html>"""
 
-    # ── Render HTML dashboard ─────────────────────────────────────────────
-    inv_cc_d = st.session_state.inv_store.get("CC")
-    inv_rr_d = st.session_state.inv_store.get("RR")
-    ord_cc_d = st.session_state.ord_store.get("CC")
-    ord_rr_d = st.session_state.ord_store.get("RR")
+    components.html(html_store, height=420, scrolling=False)
 
-    if inv_view is not None or ord_view is not None:
-        html_dash = _build_dashboard_html(
-            inv_cc_d, inv_rr_d, ord_cc_d, ord_rr_d, inv_view, ord_view
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 2 — INVENTORY ACCURACY  (requires WH file)
+    # ══════════════════════════════════════════════════════════════════════
+    if st.session_state.wh_df is None:
+        st.info("🏭 Upload the Warehouse Master File above to see the Inventory Accuracy section.")
+        st.stop()
+
+    wh_df = st.session_state.wh_df
+
+    # ── Compute accuracy metrics ──────────────────────────────────────────
+    # Shopify "Online" location = shared warehouse in Shopify
+    def _online_stock(df):
+        if df is None: return pd.DataFrame(columns=["SKU_norm","Shopify_Online"])
+        online = df[df["Location"] == "Online"].copy()
+        return (
+            online.groupby("SKU_norm")["On_Hand"]
+            .sum().reset_index()
+            .rename(columns={"On_Hand": "Shopify_Online"})
         )
-        components.html(html_dash, height=1230, scrolling=False)
 
-    # ── Transit info banner ───────────────────────────────────────────────
-    _pos_transit = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
-    _transit_qty = {}
-    for _p in _pos_transit:
-        for _s in _p.get("skus",[]):
-            _k = _s["sku"].strip().upper()
-            _transit_qty[_k] = _transit_qty.get(_k,0) + int(_s.get("qty",0))
-    if _transit_qty and inv_view is not None and ord_view is not None:
-        _fp = check_fulfillability(ord_view, inv_view)
-        _cant = _fp[~_fp["Can_Fulfill"]].copy()
-        _cant["_up"] = _cant["SKU"].astype(str).str.strip().str.upper()
-        _n_full = int(_cant.apply(lambda r: _transit_qty.get(r["_up"],0)>=r["Gap"],axis=1).sum())
-        _n_part = int(_cant.apply(lambda r: 0 < _transit_qty.get(r["_up"],0) < r["Gap"],axis=1).sum())
-        _n = _n_full + _n_part
-        if _n:
-            st.info(f"🚚 **{_n} open order line(s)** have items in an **In Transit PO** — {_n_full} fully covered, {_n_part} partially covered.")
+    cc_online = _online_stock(inv_cc)
+    rr_online = _online_stock(inv_rr)
 
-    # ── Detail expanders ──────────────────────────────────────────────────
-    _fulf_detail = None
-    _can_df = _cant_df = pd.DataFrame()
-    if ord_view is not None and inv_view is not None:
-        _fulf_detail = check_fulfillability(ord_view, inv_view)
-        _now_ts = pd.Timestamp.now(tz="UTC")
-        _open_ord = ord_view[
-            ord_view["Fulfillment_Status"].isin(["unfulfilled","partial",""])
-        ].drop_duplicates("Order_ID")[["Order_ID","Created_At","Financial_Status"]].copy()
-        _open_ord["Days Open"] = (
-            (_now_ts - _open_ord["Created_At"]).dt.total_seconds() / 86400
-        ).round(1)
-        _fulf_t = _fulf_detail.merge(_open_ord[["Order_ID","Days Open"]], on="Order_ID", how="left")
+    # Merge CC+RR online stock
+    shopify_online = cc_online.merge(rr_online, on="SKU_norm", how="outer", suffixes=("_cc","_rr")).fillna(0)
+    shopify_online["Shopify_Online"] = shopify_online.get("Shopify_Online_cc", shopify_online.get("Shopify_Online",0)) + \
+                                       shopify_online.get("Shopify_Online_rr", 0)
+    # Handle column naming depending on merge
+    for col in ["Shopify_Online_cc", "Shopify_Online_rr"]:
+        if col in shopify_online.columns:
+            pass
+    # Recompute cleanly
+    cc_on = cc_online.rename(columns={"Shopify_Online":"CC_Online"})
+    rr_on = rr_online.rename(columns={"Shopify_Online":"RR_Online"})
+    shopify_online = cc_on.merge(rr_on, on="SKU_norm", how="outer").fillna(0)
+    shopify_online["Shopify_Online"] = shopify_online["CC_Online"] + shopify_online["RR_Online"]
+    shopify_online_valued = shopify_online[shopify_online["Shopify_Online"] > 0]
 
-        _pos_t = [p for p in st.session_state.pos if p.get("status")=="In Transit"]
-        _tqty = {}
-        for _p in _pos_t:
-            for _s in _p.get("skus",[]):
-                _tqty[_s["sku"].strip().upper()] = _tqty.get(_s["sku"].strip().upper(),0)+int(_s.get("qty",0))
-        def _ts(row):
-            in_t = _tqty.get(row["_sku_up"],0)
-            if in_t==0: return "—",False
-            elif in_t>=row["Gap"]: return f"🚚 Yes ({in_t})",True
-            else: return f"⚠️ Partial ({in_t}/{row['Gap']})",False
-        _cant_df = _fulf_t[~_fulf_t["Can_Fulfill"]].copy()
-        _cant_df["_sku_up"] = _cant_df["SKU"].astype(str).str.strip().str.upper()
-        _cant_df[["Transit_Status","_covered"]] = _cant_df.apply(lambda r: pd.Series(_ts(r)), axis=1)
-        _can_df  = _fulf_t[_fulf_t["Can_Fulfill"]].sort_values("Days Open", ascending=False)
+    # Warehouse aggregated
+    wh_agg = (
+        wh_df.groupby("SKU_norm")
+        .agg(
+            WH_SKU  =("SKU",         "first"),
+            WH_Desc =("Description", "first"),
+            WH_Brand=("Brand",       "first"),
+            WH_Stock=("Stock_Qty",   "sum"),
+        )
+        .reset_index()
+    )
+    wh_with_stock = wh_agg[wh_agg["WH_Stock"] > 0]
 
-    if inv_view is not None:
-        loc_df_exp, _ = _loc_stats(inv_view)
-        display = loc_df_exp.copy()
-        display["% of Total"]  = display["pct_total"].round(1).astype(str) + "%"
-        display["% Available"] = display["pct_available"].round(1).astype(str) + "%"
-        display["% Committed"] = display["pct_committed"].round(1).astype(str) + "%"
-        with st.expander("📦 Inventory detail by location"):
-            st.dataframe(
-                display[["Location","On_Hand","% of Total","Available","% Available","Committed","% Committed","Incoming"]]
-                .rename(columns={"On_Hand":"On Hand"}),
-                use_container_width=True, hide_index=True,
-            )
+    # Three-way join: Shopify Online vs WH
+    merged = shopify_online_valued.merge(
+        wh_with_stock[["SKU_norm","WH_SKU","WH_Desc","WH_Brand","WH_Stock"]],
+        on="SKU_norm", how="outer", indicator=True
+    )
 
-    if ord_view is not None:
-        with st.expander("📋 All orders"):
-            order_level = ord_view.drop_duplicates("Order_ID")[
-                ["Order_ID","Financial_Status","Fulfillment_Status","Created_At","Fulfilled_At","Subtotal","Total","Shipping_Method","Vendor"]
-            ].copy()
-            order_level["Created_At"]   = order_level["Created_At"].dt.strftime("%Y-%m-%d %H:%M")
-            order_level["Fulfilled_At"] = order_level["Fulfilled_At"].dt.strftime("%Y-%m-%d %H:%M")
-            st.dataframe(order_level, use_container_width=True, hide_index=True)
+    in_both      = merged[merged["_merge"] == "both"].copy()
+    shopify_only = merged[merged["_merge"] == "left_only"].copy()   # Shopify Online, not in WH
+    wh_only      = merged[merged["_merge"] == "right_only"].copy()  # WH stock, not in Shopify Online
 
-    if not _can_df.empty or not _cant_df.empty:
-        c1, c2 = st.columns(2)
-        with c1:
-            avg_can = round(_can_df["Days Open"].mean(), 1) if not _can_df.empty else 0
-            with st.expander(f"✅ {len(_can_df)} lines ready to ship — avg {avg_can} days open"):
-                if not _can_df.empty:
-                    try:
-                        _sbl2 = inv_view.groupby(["SKU","Location"])["Available"].sum().reset_index()
-                        _sbl2 = _sbl2[_sbl2["Available"] > 0]
-                        def _fs2(sku, qty):
-                            locs = _sbl2[_sbl2["SKU"]==sku].sort_values("Available", ascending=False)
-                            for _, r in locs.iterrows():
-                                if r["Available"] >= qty: return r["Location"]
-                            return "Mix: " + " + ".join(locs["Location"].tolist()) if not locs.empty else "—"
-                        _can_show = _can_df.copy()
-                        _can_show["Pick From"] = _can_show.apply(
-                            lambda r: _fs2(r["SKU"], float(r["Qty_Ordered"])), axis=1)
-                    except Exception:
-                        _can_show = _can_df.copy()
-                        _can_show["Pick From"] = "—"
-                    st.dataframe(
-                        _can_show[["Order_ID","SKU","Item_Name","Qty_Ordered","Pick From",
-                                   "Available_Stock","Financial_Status","Days Open"]]
-                        .rename(columns={"Order_ID":"Order","Item_Name":"Item",
-                                         "Qty_Ordered":"Qty","Available_Stock":"In Stock",
-                                         "Financial_Status":"Status"}),
-                        use_container_width=True, hide_index=True,
-                    )
-        with c2:
-            avg_cant = round(_cant_df["Days Open"].mean(), 1) if not _cant_df.empty else 0
-            with st.expander(f"❌ {len(_cant_df)} lines stock short — avg {avg_cant} days open"):
-                show = _cant_df[["Order_ID","SKU","Item_Name","Qty_Ordered",
-                                  "Available_Stock","Gap","Financial_Status",
-                                  "Transit_Status","Days Open"]].copy()
-                show.columns = ["Order","SKU","Item","Qty","In Stock","Gap",
-                                 "Status","In Transit PO","Days Open"]
-                st.dataframe(show, use_container_width=True, hide_index=True)
-
-    if inv_view is not None and ord_view is not None:
-        st.caption("Inventory movement analysis — based on orders in current export period")
-        ord_skus_set = set(ord_view["SKU"].astype(str).str.strip().dropna())
-        ord_skus_set.discard(""); ord_skus_set.discard("nan")
-        inv_active = inv_view.copy()
-        sku_oh = inv_active.groupby("SKU")["On_Hand"].sum()
-        active_skus = sku_oh[sku_oh > 0].index
-        inv_active = inv_active[inv_active["SKU"].isin(active_skus)]
-        inv_summary = inv_active.groupby(["SKU","Title"]).agg(
-            On_Hand   =("On_Hand",   "sum"),
-            Available =("Available", "sum"),
-            Committed =("Committed", "sum"),
-            Incoming  =("Incoming",  "sum"),
+    # Add SKU / Title to shopify_only from inv_df
+    if inv_df is not None:
+        sku_meta = inv_df.groupby("SKU_norm").agg(
+            SKU=("SKU","first"), Title=("Title","first")
         ).reset_index()
-        inv_summary["Movement"] = inv_summary["SKU"].apply(
-            lambda s: "With movement" if s in ord_skus_set else "No movement"
-        )
-        with_mov = inv_summary[inv_summary["Movement"] == "With movement"].sort_values("On_Hand", ascending=False)
-        no_mov   = inv_summary[inv_summary["Movement"] == "No movement"].sort_values("On_Hand", ascending=False)
-        c1, c2 = st.columns(2)
-        with c1:
-            with st.expander(f"✅ {len(with_mov):,} SKUs with movement — {int(with_mov['On_Hand'].sum()):,} units on hand"):
-                st.dataframe(
-                    with_mov[["SKU","Title","On_Hand","Available","Committed","Incoming"]]
-                    .rename(columns={"On_Hand":"On Hand"}),
-                    use_container_width=True, hide_index=True,
-                )
-        with c2:
-            with st.expander(f"⚠️ {len(no_mov):,} SKUs with no movement — {int(no_mov['On_Hand'].sum()):,} units on hand"):
-                st.dataframe(
-                    no_mov[["SKU","Title","On_Hand","Available","Committed","Incoming"]]
-                    .rename(columns={"On_Hand":"On Hand"}),
-                    use_container_width=True, hide_index=True,
-                )
+        shopify_only = shopify_only.merge(sku_meta, on="SKU_norm", how="left")
+
+    # Discrepancy in matched
+    in_both["WH_Stock"]      = in_both["WH_Stock"].fillna(0).astype(int)
+    in_both["Shopify_Online"] = in_both["Shopify_Online"].fillna(0).astype(int)
+    in_both["Delta"]         = in_both["WH_Stock"] - in_both["Shopify_Online"]
+
+    exact_match   = int((in_both["Delta"] == 0).sum())
+    wh_higher     = int((in_both["Delta"] >  0).sum())
+    wh_lower      = int((in_both["Delta"] <  0).sum())
+    total_matched = len(in_both)
+    total_sh_on   = int(shopify_online_valued["Shopify_Online"].sum())
+    total_wh      = int(wh_with_stock["WH_Stock"].sum())
+    match_pct     = round(exact_match / total_matched * 100, 1) if total_matched else 0
+
+    # ── Accuracy KPI HTML cards ───────────────────────────────────────────
+    css_acc = """
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:transparent;color:#111;}
+.wrap{padding:4px 0 8px;}
+.sec-lbl{font-size:10px;letter-spacing:.08em;color:#aaa;text-transform:uppercase;margin-bottom:10px;}
+.row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px;}
+.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+.card{background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:14px 16px;}
+.card-green{background:#f0faf5;border:1px solid #b2dfc9;}
+.card-red{background:#fff5f5;border:1px solid #f5c0c0;}
+.card-amber{background:#fffbf0;border:1px solid #f5dfa0;}
+@media(prefers-color-scheme:dark){
+  body{color:#f0f0f0;}
+  .card{background:#1a1a1a;border-color:#2e2e2e;}
+  .card-green{background:#0d2b1e;border-color:#1a5c3a;}
+  .card-red{background:#2b0d0d;border-color:#5c1a1a;}
+  .card-amber{background:#2b2200;border-color:#5c4400;}
+}
+.lbl{font-size:10px;color:#888;margin-bottom:4px;letter-spacing:.03em;}
+.val{font-size:22px;font-weight:500;}
+.sub{font-size:11px;margin-top:3px;color:#aaa;}
+.val-green{color:#1D9E75;}
+.val-red{color:#E24B4A;}
+.val-amber{color:#BA7517;}
+.big-pct{font-size:38px;font-weight:600;}
+"""
+
+    html_acc = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>{css_acc}</style></head><body><div class="wrap">
+<div class="sec-lbl">Inventory accuracy — Warehouse vs Shopify Online</div>
+<div class="row">
+  <div class="card">
+    <div class="lbl">Shopify Online SKUs (valued)</div>
+    <div class="val">{len(shopify_online_valued):,}</div>
+    <div class="sub">{total_sh_on:,} total units</div>
+  </div>
+  <div class="card">
+    <div class="lbl">Warehouse SKUs (stock &gt; 0)</div>
+    <div class="val">{len(wh_with_stock):,}</div>
+    <div class="sub">{total_wh:,} total units</div>
+  </div>
+  <div class="card">
+    <div class="lbl">Matched SKUs (in both)</div>
+    <div class="val">{total_matched:,}</div>
+    <div class="sub">cross-referenced</div>
+  </div>
+  <div class="card {'card-green' if match_pct >= 80 else 'card-amber' if match_pct >= 50 else 'card-red'}">
+    <div class="lbl">Accuracy rate</div>
+    <div class="val big-pct {'val-green' if match_pct >= 80 else 'val-amber' if match_pct >= 50 else 'val-red'}">{match_pct}%</div>
+    <div class="sub">exact qty match / matched SKUs</div>
+  </div>
+</div>
+<div class="row3">
+  <div class="card card-green">
+    <div class="lbl">✅ Exact match</div>
+    <div class="val val-green">{exact_match:,}</div>
+    <div class="sub">WH qty = Shopify Online qty</div>
+  </div>
+  <div class="card card-amber">
+    <div class="lbl">⬆ WH &gt; Shopify Online</div>
+    <div class="val val-amber">{wh_higher:,}</div>
+    <div class="sub">Warehouse has more units than Shopify</div>
+  </div>
+  <div class="card card-red">
+    <div class="lbl">⬇ WH &lt; Shopify Online</div>
+    <div class="val val-red">{wh_lower:,}</div>
+    <div class="sub">Shopify shows more units than warehouse</div>
+  </div>
+</div>
+<div class="row3">
+  <div class="card card-red">
+    <div class="lbl">🏭 WH only — not in Shopify Online</div>
+    <div class="val val-amber">{len(wh_only):,}</div>
+    <div class="sub">Physical stock missing in Shopify Online</div>
+  </div>
+  <div class="card card-amber">
+    <div class="lbl">🛍 Shopify only — not in WH</div>
+    <div class="val val-red">{len(shopify_only):,}</div>
+    <div class="sub">Shopify Online has stock, WH file doesn't</div>
+  </div>
+  <div class="card">
+    <div class="lbl">📋 Total discrepancies</div>
+    <div class="val">{wh_higher + wh_lower + len(wh_only) + len(shopify_only):,}</div>
+    <div class="sub">SKUs requiring review or adjustment</div>
+  </div>
+</div>
+</div></body></html>"""
+
+    components.html(html_acc, height=300, scrolling=False)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 3 — INVENTORY REPORT  (discrepancy detail)
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("### 📋 Inventory Report")
+    st.caption("Discrepancies between Warehouse master file and Shopify Online location. Use this to adjust stock in Shopify.")
+
+    tab_disc, tab_wh_only, tab_sh_only = st.tabs([
+        f"⚖️ Qty Discrepancy ({wh_higher + wh_lower:,})",
+        f"🏭 WH only — add to Shopify ({len(wh_only):,})",
+        f"🛍 Shopify only — review ({len(shopify_only):,})",
+    ])
+
+    # ── Tab 1: Qty discrepancy (matched but different qty) ────────────────
+    with tab_disc:
+        st.caption("SKUs present in both sources but with different quantities. Adjust the **Shopify Online** location to match the physical count.")
+
+        disc_df = in_both[in_both["Delta"] != 0].copy()
+        if disc_df.empty:
+            st.success("✅ No quantity discrepancies found — all matched SKUs have identical counts.")
+        else:
+            # Add SKU/Title from Shopify
+            if inv_df is not None:
+                sku_meta2 = inv_df.groupby("SKU_norm").agg(
+                    Shopify_SKU=("SKU","first"), Title=("Title","first")
+                ).reset_index()
+                disc_df = disc_df.merge(sku_meta2, on="SKU_norm", how="left")
+
+            disc_df["Adjustment Needed"] = disc_df["Delta"].apply(
+                lambda d: f"▲ Add {d:+,} in Shopify" if d > 0 else f"▼ Remove {abs(d):,} from Shopify"
+            )
+            disc_df["Priority"] = disc_df["Delta"].abs()
+
+            show_cols = {}
+            if "Shopify_SKU" in disc_df.columns:
+                show_cols["Shopify_SKU"] = "Shopify SKU"
+            if "WH_SKU" in disc_df.columns:
+                show_cols["WH_SKU"] = "WH SKU"
+            if "Title" in disc_df.columns:
+                show_cols["Title"] = "Product Title"
+            if "WH_Brand" in disc_df.columns:
+                show_cols["WH_Brand"] = "Brand"
+            if "WH_Desc" in disc_df.columns:
+                show_cols["WH_Desc"] = "WH Description"
+            show_cols.update({
+                "WH_Stock":         "WH Stock",
+                "Shopify_Online":   "Shopify Online",
+                "Delta":            "Delta",
+                "Adjustment Needed":"Action",
+            })
+
+            display = disc_df[list(show_cols.keys())].rename(columns=show_cols)
+            display = display.sort_values("Delta", key=abs, ascending=False).reset_index(drop=True)
+
+            # Color-code: positive delta = WH higher (amber), negative = WH lower (red)
+            st.dataframe(
+                display,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Delta": st.column_config.NumberColumn("Delta", format="%+d"),
+                    "WH Stock": st.column_config.NumberColumn("WH Stock"),
+                    "Shopify Online": st.column_config.NumberColumn("Shopify Online"),
+                }
+            )
+            st.caption(f"{len(display):,} SKUs with quantity discrepancy · "
+                       f"WH higher: {wh_higher:,} · WH lower: {wh_lower:,}")
+
+    # ── Tab 2: WH only — not in Shopify Online ───────────────────────────
+    with tab_wh_only:
+        st.caption("These SKUs have physical stock in the warehouse but **zero units in Shopify Online location**. Add them to Shopify to reflect actual stock.")
+
+        if wh_only.empty:
+            st.success("✅ All warehouse SKUs are reflected in Shopify Online.")
+        else:
+            wh_show = wh_only[["WH_SKU","WH_Brand","WH_Desc","WH_Stock"]].copy()
+            wh_show.columns = ["WH SKU","Brand","Description","WH Stock"]
+            wh_show["Action"] = "▲ Add to Shopify Online"
+            wh_show = wh_show.sort_values("WH Stock", ascending=False).reset_index(drop=True)
+            st.dataframe(
+                wh_show,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "WH Stock": st.column_config.NumberColumn("WH Stock"),
+                }
+            )
+            st.caption(f"{len(wh_show):,} SKUs · {int(wh_only['WH_Stock'].sum()):,} total units not reflected in Shopify")
+
+    # ── Tab 3: Shopify Online only — not in WH ───────────────────────────
+    with tab_sh_only:
+        st.caption("These SKUs show stock in **Shopify Online** but are absent from the Warehouse master file. Verify physical count or remove from Shopify if stock doesn't exist.")
+
+        if shopify_only.empty:
+            st.success("✅ All Shopify Online SKUs are present in the warehouse file.")
+        else:
+            sh_cols = ["SKU_norm"]
+            rename_sh = {"SKU_norm": "SKU norm"}
+            if "SKU" in shopify_only.columns:
+                sh_cols.insert(0, "SKU"); rename_sh["SKU"] = "Shopify SKU"
+            if "Title" in shopify_only.columns:
+                sh_cols.append("Title"); rename_sh["Title"] = "Product Title"
+            sh_cols.append("Shopify_Online")
+            rename_sh["Shopify_Online"] = "Shopify Online Units"
+
+            sh_show = shopify_only[[c for c in sh_cols if c in shopify_only.columns]].copy()
+            sh_show = sh_show.rename(columns=rename_sh)
+            sh_show["Action"] = "🔍 Verify / Remove from Shopify"
+            sh_show = sh_show.sort_values("Shopify Online Units", ascending=False).reset_index(drop=True)
+            st.dataframe(
+                sh_show,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Shopify Online Units": st.column_config.NumberColumn("Shopify Online Units"),
+                }
+            )
+            st.caption(f"{len(sh_show):,} SKUs · {int(shopify_only['Shopify_Online'].sum()):,} total units in Shopify with no WH record")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -982,11 +725,10 @@ elif page == "📦 Inventory Control":
                 _ic_store = next(iter(st.session_state.inv_store), None)
 
             ic_inv = (inv_df[inv_df["Store"] == _ic_store].copy()
-                      if _ic_store and "Store" in inv_df.columns
-                      else inv_df.copy())
+                      if _ic_store and "Store" in inv_df.columns else inv_df.copy())
 
             loc_df, grand_total = _loc_stats(ic_inv)
-            active_locs = loc_df["Location"].tolist()
+            active_locs  = loc_df["Location"].tolist()
             selected_loc = st.selectbox("Location", ["All Locations"] + active_locs)
 
             filtered = (ic_inv.copy() if selected_loc == "All Locations"
@@ -1032,12 +774,11 @@ elif page == "📦 Inventory Control":
                 sel_title = st.selectbox("Select product", title_list)
                 variant_df = ic_inv[ic_inv["Title"] == sel_title] if selected_loc == "All Locations" \
                     else ic_inv[(ic_inv["Title"] == sel_title) & (ic_inv["Location"] == selected_loc)]
-                show_cols = ["SKU","Option1_Name","Option1_Value","Option2_Name","Option2_Value",
-                             "Option3_Name","Option3_Value","Location","On_Hand","Available","Committed","Incoming"]
-                opt_cols = [c for c in show_cols if c.startswith("Option")]
-                non_empty_opts = [c for c in opt_cols
-                                  if variant_df[c].astype(str).str.strip().replace("nan","").any()]
-                final_cols = ["SKU"] + non_empty_opts + ["Location","On_Hand","Available","Committed","Incoming"]
+                show_cols  = ["SKU","Option1_Name","Option1_Value","Option2_Name","Option2_Value",
+                              "Option3_Name","Option3_Value","Location","On_Hand","Available","Committed","Incoming"]
+                opt_cols   = [c for c in show_cols if c.startswith("Option")]
+                non_empty  = [c for c in opt_cols if variant_df[c].astype(str).str.strip().replace("nan","").any()]
+                final_cols = ["SKU"] + non_empty + ["Location","On_Hand","Available","Committed","Incoming"]
                 st.dataframe(
                     variant_df[final_cols].rename(columns={"On_Hand":"On Hand"}),
                     use_container_width=True, hide_index=True,
@@ -1060,7 +801,7 @@ elif page == "📦 Inventory Control":
                 except Exception:
                     pass
 
-            ord_df2 = st.session_state.ord_df
+            ord_df2     = st.session_state.ord_df
             sku_to_open = {}
             if ord_df2 is not None:
                 open_lines = ord_df2[
@@ -1072,8 +813,7 @@ elif page == "📦 Inventory Control":
                 ]
                 for _, row in open_lines.iterrows():
                     sku_to_open.setdefault(str(row["SKU"]).upper(), []).append({
-                        "order": row["Order_ID"],
-                        "item":  str(row["Item_Name"])[:50],
+                        "order": row["Order_ID"], "item": str(row["Item_Name"])[:50],
                         "qty":   int(row["Qty_Ordered"]),
                     })
 
@@ -1082,8 +822,8 @@ elif page == "📦 Inventory Control":
                 except: return datetime.max
 
             status_filter = st.selectbox("Filter by status",
-                ["All", "In Transit", "Arrived", "Completed", "Cancelled"], key="recv_filter")
-            filtered_pos = sorted(
+                ["All","In Transit","Arrived","Completed","Cancelled"], key="recv_filter")
+            filtered_pos  = sorted(
                 [p for p in pos_all if status_filter == "All" or p["status"] == status_filter],
                 key=_eta_sort
             )
@@ -1095,47 +835,34 @@ elif page == "📦 Inventory Control":
                     status_icon = {"In Transit":"🚚","Arrived":"📦","Completed":"✅","Cancelled":"❌"}.get(po.get("status",""),"📋")
                     try:
                         delta = (datetime.strptime(po["eta"],"%Y-%m-%d").date() - date.today()).days
-                        if delta > 0:    days_label = f" · **{delta}d away**"
-                        elif delta == 0: days_label = " · **Arriving today**"
-                        else:            days_label = f" · **{abs(delta)}d overdue**"
+                        days_label = f" · **{delta}d away**" if delta > 0 else \
+                                     " · **Arriving today**" if delta == 0 else \
+                                     f" · **{abs(delta)}d overdue**"
                     except:
                         days_label = ""
 
                     po_skus = {s["sku"].strip().upper() for s in po.get("skus", [])}
-                    matched = []
-                    for sku in po_skus:
-                        for entry in sku_to_open.get(sku, []):
-                            matched.append({**entry, "sku": sku})
+                    matched = [{**entry, "sku": sku}
+                               for sku in po_skus for entry in sku_to_open.get(sku, [])]
 
                     with st.container(border=True):
                         c1, c2, c3 = st.columns([3, 3, 2])
-                        c1.markdown(
-                            f"{status_icon} **{po['id']}** · {po['brand']}"
-                            + (f"\n\nPO#: `{po['po_number']}`" if po.get("po_number","—") != "—" else "")
-                        )
-                        c2.markdown(
-                            f"📅 ETA: **{po['eta']}**{days_label}  \n"
-                            f"📍 {po.get('location','—')}  \n"
-                            + (f"🚛 {po['ship_via']}" if po.get("ship_via","—") != "—" else "")
-                        )
-                        c3.markdown(
-                            f"Status: **{po.get('status','')}**  \n"
-                            f"Lines: **{len(po.get('skus',[]))}**  \n"
-                            f"Created: {po['created']}"
-                        )
+                        c1.markdown(f"{status_icon} **{po['id']}** · {po['brand']}"
+                            + (f"\n\nPO#: `{po['po_number']}`" if po.get("po_number","—") != "—" else ""))
+                        c2.markdown(f"📅 ETA: **{po['eta']}**{days_label}  \n📍 {po.get('location','—')}  \n"
+                            + (f"🚛 {po['ship_via']}" if po.get("ship_via","—") != "—" else ""))
+                        c3.markdown(f"Status: **{po.get('status','')}**  \nLines: **{len(po.get('skus',[]))}**  \nCreated: {po['created']}")
+
                         st.divider()
                         cb1, cb2, info_col = st.columns([2, 2, 4])
                         is_arrived   = po.get("status") in ("Arrived","Completed")
                         is_completed = po.get("status") == "Completed"
-                        arrived_check = cb1.checkbox("📦 Arrived", value=is_arrived,
-                            key=f"arr_{po['id']}", help="Mark when shipment physically arrives")
-                        completed_check = cb2.checkbox("✅ Completed", value=is_completed,
-                            key=f"cmp_{po['id']}", help="Mark when items entered in Shopify",
-                            disabled=(not is_arrived and not arrived_check))
+                        arrived_check   = cb1.checkbox("📦 Arrived", value=is_arrived, key=f"arr_{po['id']}")
+                        completed_check = cb2.checkbox("✅ Completed", value=is_completed, key=f"cmp_{po['id']}",
+                                                        disabled=(not is_arrived and not arrived_check))
 
-                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                        changed = False
-                        if completed_check and not is_completed:
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M"); changed = False
+                        if   completed_check and not is_completed:
                             po["status"] = "Completed"; po["completed_at"] = now_str
                             if not po.get("arrived_at"): po["arrived_at"] = now_str
                             changed = True
@@ -1194,9 +921,7 @@ elif page == "📋 PO Tracker":
     def _parse_table(table):
         if not table or len(table) < 2: return []
         headers = [str(h).lower().strip() if h else "" for h in table[0]]
-        si = _find_col(headers, SKU_KW)
-        di = _find_col(headers, DESC_KW)
-        qi = _find_col(headers, QTY_KW)
+        si = _find_col(headers, SKU_KW); di = _find_col(headers, DESC_KW); qi = _find_col(headers, QTY_KW)
         items = []
         for row in table[1:]:
             sku  = str(row[si]).strip() if si is not None and si < len(row) else ""
@@ -1208,23 +933,21 @@ elif page == "📋 PO Tracker":
 
     def extract_from_pdf(file_bytes):
         import pdfplumber, io, re
-        ARTICLE_START = re.compile(r'^([A-Z0-9][A-Z0-9\.\-_]{5,30})\s+', re.I)
-        HAS_DOT       = re.compile(r'\.')
-        QTY_UNIT      = re.compile(r'\b(\d+)\s+(?:Pcs|EA|Units?|Each)\b', re.I)
-        FOOTER_RE     = re.compile(r'^(Net Total|Discount|Shipping|GST|PST|Total\b|Whs Policy|Thank you)', re.I)
-        ITEM_HEADER_RE= re.compile(r'(Article|SKU|Item|Ref)\s+(Colour|Color|Description|Desc)', re.I)
-        BRAND_RE      = re.compile(r'Banking Info:\s*(.+)', re.I)
-        INV_RE        = re.compile(r'\b(INV/[A-Z]+/\d+)\b', re.I)
-        CUST_PO_RE    = re.compile(r'Customer PO No[.\s:]+([A-Za-z0-9_\-]+)', re.I)
-        CARRIERS      = ["UPS","DHL","FedEx","Fedex","Canada Post","Purolator","USPS","TNT","Canpar"]
+        ARTICLE_START  = re.compile(r'^([A-Z0-9][A-Z0-9\.\-_]{5,30})\s+', re.I)
+        HAS_DOT        = re.compile(r'\.')
+        QTY_UNIT       = re.compile(r'\b(\d+)\s+(?:Pcs|EA|Units?|Each)\b', re.I)
+        FOOTER_RE      = re.compile(r'^(Net Total|Discount|Shipping|GST|PST|Total\b|Whs Policy|Thank you)', re.I)
+        ITEM_HEADER_RE = re.compile(r'(Article|SKU|Item|Ref)\s+(Colour|Color|Description|Desc)', re.I)
+        BRAND_RE       = re.compile(r'Banking Info:\s*(.+)', re.I)
+        INV_RE         = re.compile(r'\b(INV/[A-Z]+/\d+)\b', re.I)
+        CUST_PO_RE     = re.compile(r'Customer PO No[.\s:]+([A-Za-z0-9_\-]+)', re.I)
+        CARRIERS       = ["UPS","DHL","FedEx","Fedex","Canada Post","Purolator","USPS","TNT","Canpar"]
         full_text = ""; items_text = []; items_table = []
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
                 txt = page.extract_text() or ""
-                full_text += txt + "\n"
-                lines = txt.splitlines()
-                for table in page.extract_tables():
-                    items_table.extend(_parse_table(table))
+                full_text += txt + "\n"; lines = txt.splitlines()
+                for table in page.extract_tables(): items_table.extend(_parse_table(table))
                 in_items = False
                 for line in lines:
                     if ITEM_HEADER_RE.search(line): in_items = True; continue
@@ -1234,11 +957,10 @@ elif page == "📋 PO Tracker":
                     if m_start:
                         code = m_start.group(1)
                         if not HAS_DOT.search(code): continue
-                        rest  = line[m_start.end():]
-                        m_qty = QTY_UNIT.search(rest)
-                        qty   = int(m_qty.group(1)) if m_qty else 1
-                        desc  = rest[:m_qty.start()].strip() if m_qty else rest.strip()
-                        items_text.append({"SKU": code, "Description": desc, "Qty": qty})
+                        rest = line[m_start.end():]; m_qty = QTY_UNIT.search(rest)
+                        items_text.append({"SKU": code,
+                                           "Description": rest[:m_qty.start()].strip() if m_qty else rest.strip(),
+                                           "Qty": int(m_qty.group(1)) if m_qty else 1})
         raw_items = items_table if items_table else items_text
         seen, items = set(), []
         for it in raw_items:
@@ -1248,19 +970,19 @@ elif page == "📋 PO Tracker":
                 items.append({"SKU": it["SKU"], "Description": it["Description"], "Qty": it["Qty"]})
         brand = ""; po_number = ""; ship_via = ""
         m = BRAND_RE.search(full_text)
-        if m: brand = re.split(r'\bGmbH\b', m.group(1).strip())[0].strip().rstrip(",").strip()
+        if m: brand = __import__("re").split(r'\bGmbH\b', m.group(1).strip())[0].strip().rstrip(",").strip()
         m = INV_RE.search(full_text)
         if m: po_number = m.group(1)
         m2 = CUST_PO_RE.search(full_text)
         if m2 and not po_number: po_number = m2.group(1).strip()
         all_lines = full_text.splitlines()
-        ship_idx = next((i for i,l in enumerate(all_lines) if re.search(r'Ship Via',l,re.I)), None)
+        ship_idx = next((i for i,l in enumerate(all_lines) if __import__("re").search(r'Ship Via',l,re.I)), None)
         if ship_idx is not None:
             for l in all_lines[ship_idx:ship_idx+6]:
                 for carrier in CARRIERS:
-                    m = re.search(rf'({re.escape(carrier)}[\w\s]{{0,12}})', l, re.I)
+                    m = __import__("re").search(rf'({__import__("re").escape(carrier)}[\w\s]{{0,12}})', l, re.I)
                     if m:
-                        ship_via = re.split(r'\s{{3,}}|\bPO\b|\bBox\b|\bRemit\b', m.group(1), flags=re.I)[0].strip()
+                        ship_via = __import__("re").split(r'\s{{3,}}|\bPO\b|\bBox\b|\bRemit\b', m.group(1), flags=re.I)[0].strip()
                         break
                 if ship_via: break
         return {"brand": brand, "po_number": po_number, "ship_via": ship_via, "items": items}
@@ -1273,9 +995,7 @@ elif page == "📋 PO Tracker":
             for c in df.columns:
                 if any(k in c.lower() for k in kw_list): return c
             return None
-        sku_col  = find_col(SKU_KW)
-        desc_col = find_col(DESC_KW)
-        qty_col  = find_col(QTY_KW)
+        sku_col = find_col(SKU_KW); desc_col = find_col(DESC_KW); qty_col = find_col(QTY_KW)
         items = []
         for _, row in df.iterrows():
             sku  = str(row[sku_col]).strip()  if sku_col  else ""
@@ -1288,10 +1008,7 @@ elif page == "📋 PO Tracker":
     with tab1:
         if st.session_state.get("po_published"):
             pub = st.session_state.po_published
-            st.success(
-                f"✅ **PO added** — `{pub['id']}` · {pub['brand']} · "
-                f"{pub['lines']} items · now visible in **Receive PO**."
-            )
+            st.success(f"✅ **PO added** — `{pub['id']}` · {pub['brand']} · {pub['lines']} items · now visible in **Receive PO**.")
             st.markdown(f"""
 | Field | Value |
 |---|---|
@@ -1303,19 +1020,15 @@ elif page == "📋 PO Tracker":
 | Ship Via | {pub.get('ship_via','—')} |
 """)
             if st.button("➕ Create another PO", type="primary"):
-                st.session_state.po_published = None
-                st.rerun()
+                st.session_state.po_published = None; st.rerun()
             st.stop()
 
         st.markdown("#### New Purchase Order")
         st.markdown("**Step 1 — Upload invoice** *(PDF, Excel, or CSV)*")
-        invoice_file = st.file_uploader(
-            "invoice", type=["pdf","xlsx","xls","csv"],
-            key="invoice_upload", label_visibility="collapsed",
-        )
+        invoice_file = st.file_uploader("invoice", type=["pdf","xlsx","xls","csv"],
+                                         key="invoice_upload", label_visibility="collapsed")
         if invoice_file and "invoice_extracted" not in st.session_state:
-            fname      = invoice_file.name.lower()
-            file_bytes = invoice_file.read()
+            fname = invoice_file.name.lower(); file_bytes = invoice_file.read()
             with st.spinner("Reading invoice..."):
                 try:
                     result = extract_from_pdf(file_bytes) if fname.endswith(".pdf") \
@@ -1334,11 +1047,10 @@ elif page == "📋 PO Tracker":
             result = st.session_state.invoice_extracted
             n = len(result.get("items", []))
             if n: st.success(f"✅ Extracted **{n} line items** from invoice.")
-            else: st.warning("⚠️ No line items detected. Fill them in manually.")
+            else:  st.warning("⚠️ No line items detected. Fill them in manually.")
             if st.button("🗑 Clear invoice / start over"):
                 st.session_state.pop("invoice_extracted", None)
-                st.session_state.po_items = [{"SKU":"","Description":"","Qty":1}]
-                st.rerun()
+                st.session_state.po_items = [{"SKU":"","Description":"","Qty":1}]; st.rerun()
 
         st.divider()
         st.markdown("**Step 2 — Order details**")
@@ -1346,7 +1058,7 @@ elif page == "📋 PO Tracker":
         c1, c2 = st.columns(2)
         brand    = c1.text_input("Brand / Vendor *", value=extracted.get("brand",""), placeholder="e.g. Specialized, MAAP")
         supplier = c2.text_input("Distributor", placeholder="optional")
-        c1, c2 = st.columns(2)
+        c1, c2   = st.columns(2)
         eta      = c1.date_input("Expected Arrival *", value=date.today())
         location = c2.selectbox("Destination *", SHOPIFY_LOCATIONS)
         with st.expander("Optional — PO Number, Ship Via, Tracking"):
@@ -1358,14 +1070,13 @@ elif page == "📋 PO Tracker":
         st.divider()
         st.markdown("**Step 3 — Review line items**")
         items = st.session_state.po_items
-        header = st.columns([2, 5, 1, 0.5])
-        header[0].caption("SKU / Article"); header[1].caption("Description"); header[2].caption("Qty")
-
+        h = st.columns([2, 5, 1, 0.5])
+        h[0].caption("SKU / Article"); h[1].caption("Description"); h[2].caption("Qty")
         for i, item in enumerate(items):
             c1, c2, c3, c4 = st.columns([2, 5, 1, 0.5])
-            items[i]["SKU"]         = c1.text_input("SKU",  value=item["SKU"],  key=f"po_sku_{i}",  placeholder="SKU",         label_visibility="collapsed")
+            items[i]["SKU"]         = c1.text_input("SKU",  value=item["SKU"],         key=f"po_sku_{i}",  placeholder="SKU",         label_visibility="collapsed")
             items[i]["Description"] = c2.text_input("Desc", value=item["Description"], key=f"po_desc_{i}", placeholder="Description", label_visibility="collapsed")
-            items[i]["Qty"]         = c3.number_input("Qty", value=item["Qty"], key=f"po_qty_{i}",  min_value=1,               label_visibility="collapsed")
+            items[i]["Qty"]         = c3.number_input("Qty", value=item["Qty"],        key=f"po_qty_{i}",  min_value=1,               label_visibility="collapsed")
             if c4.button("🗑", key=f"del_{i}") and len(items) > 1:
                 st.session_state.po_items.pop(i); st.rerun()
 
@@ -1387,8 +1098,7 @@ elif page == "📋 PO Tracker":
                     "id": new_id, "brand": brand, "supplier": supplier or "—",
                     "eta": str(eta), "location": location, "status": "In Transit",
                     "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "po_number": po_number or "—", "ship_via": ship_via or "—",
-                    "tracking": tracking or "—",
+                    "po_number": po_number or "—", "ship_via": ship_via or "—", "tracking": tracking or "—",
                     "skus": [{"sku": i["SKU"], "desc": i["Description"], "qty": i["Qty"]} for i in valid_lines],
                 })
                 st.session_state.po_published = {
@@ -1411,18 +1121,12 @@ elif page == "📋 PO Tracker":
                 icon = {"In Transit":"🚚","Arrived":"📦","Completed":"✅","Cancelled":"❌"}.get(po["status"],"📋")
                 with st.container(border=True):
                     c1, c2, c3, c4 = st.columns([2,2,2,1])
-                    c1.markdown(
-                        f"**{po['id']}**  \n{po['brand']} · {po['supplier']}  \n"
-                        + (f"PO#: `{po['po_number']}`" if po.get('po_number','—') != '—' else "")
-                    )
-                    c2.markdown(
-                        f"**ETA:** {po['eta']}  \n**Dest:** {po['location']}  \n"
-                        + (f"Ship Via: {po['ship_via']}" if po.get('ship_via','—') != '—' else "")
-                    )
-                    c3.markdown(
-                        f"**Status:** {icon} {po['status']}  \n**Created:** {po['created']}  \n"
-                        + (f"Tracking: `{po['tracking']}`" if po.get('tracking','—') != '—' else "")
-                    )
+                    c1.markdown(f"**{po['id']}**  \n{po['brand']} · {po['supplier']}  \n"
+                        + (f"PO#: `{po['po_number']}`" if po.get('po_number','—') != '—' else ""))
+                    c2.markdown(f"**ETA:** {po['eta']}  \n**Dest:** {po['location']}  \n"
+                        + (f"Ship Via: {po['ship_via']}" if po.get('ship_via','—') != '—' else ""))
+                    c3.markdown(f"**Status:** {icon} {po['status']}  \n**Created:** {po['created']}  \n"
+                        + (f"Tracking: `{po['tracking']}`" if po.get('tracking','—') != '—' else ""))
                     c4.markdown(f"**Lines:** {len(po.get('skus',[]))}")
                     if po.get("skus"):
                         with st.expander("View items"):
