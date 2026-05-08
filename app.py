@@ -17,7 +17,7 @@ st.set_page_config(
 
 # ── Import data engine ────────────────────────────────────────────────────────
 try:
-    from data_engine.py import (
+    from data_engine import (
         parse_inventory, parse_orders,
         inventory_by_sku, orders_summary,
         check_fulfillability,
