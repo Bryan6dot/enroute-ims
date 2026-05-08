@@ -579,7 +579,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 </div>
 </div></body></html>"""
 
-    components.html(html_acc, height=400, scrolling=False)
+    components.html(html_acc, height=480, scrolling=False)
 
     # ══════════════════════════════════════════════════════════════════════
     # SECTION 3 — INVENTORY REPORT  (discrepancy detail)
@@ -616,6 +616,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             ).reset_index()
             candidates = candidates.merge(sku_meta3, on="SKU_norm", how="left")
 
+            # Add Store (CC / RR / CC+RR)
+            cc_skus = set(inv_cc["SKU_norm"]) if inv_cc is not None else set()
+            rr_skus = set(inv_rr["SKU_norm"]) if inv_rr is not None else set()
+            def _store(n):
+                in_cc = n in cc_skus
+                in_rr = n in rr_skus
+                if in_cc and in_rr: return "CC + RR"
+                if in_cc:           return "CC 🚴"
+                if in_rr:           return "RR 🏃"
+                return "—"
+            candidates["Store"] = candidates["SKU_norm"].apply(_store)
+
             # Pivot non-Online locations as individual columns
             pivot_skus = non_online[non_online["SKU_norm"].isin(candidates["SKU_norm"])].copy()
             loc_pivot = pivot_skus.pivot_table(
@@ -641,69 +653,76 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             )
             misassign_df = candidates.copy()
 
+    # SKU_norms that belong in Misassignment — exclude from Qty Discrepancy
+    misassign_skus = set(misassign_df["SKU_norm"]) if not misassign_df.empty else set()
     n_misassign = len(misassign_df)
 
+    # Pure discrepancy = matched with delta != 0 AND no non-Online stock
+    pure_disc_df = in_both[
+        (in_both["Delta"] != 0) & (~in_both["SKU_norm"].isin(misassign_skus))
+    ].copy()
+    n_pure_disc = len(pure_disc_df)
+
     tab_disc, tab_wh_only, tab_sh_only, tab_wrong_loc = st.tabs([
-        f"⚖️ Qty Discrepancy ({wh_higher + wh_lower:,})",
+        f"⚖️ Qty Discrepancy ({n_pure_disc:,})",
         f"🏭 WH only — add to Shopify ({len(wh_only):,})",
         f"🛍 Shopify only — review ({len(shopify_only):,})",
         f"📍 Possible Misassignment ({n_misassign:,})",
     ])
 
-    # ── Tab 1: Qty discrepancy (matched but different qty) ────────────────
+    # ── Tab 1: Qty discrepancy ────────────────────────────────────────────
+    # Only SKUs where WH ≠ Shopify Online AND the SKU has NO stock in any
+    # other Shopify location (those cases live in Possible Misassignment).
     with tab_disc:
-        st.caption("SKUs present in both sources but with different quantities. Adjust the **Shopify Online** location to match the physical count.")
+        st.caption(
+            "SKUs where WH stock ≠ Shopify Online **and** the item has no stock "
+            "in any other Shopify location. Adjust the Shopify Online qty to match the physical count."
+        )
 
-        disc_df = in_both[in_both["Delta"] != 0].copy()
+        disc_df = pure_disc_df.copy()
         if disc_df.empty:
-            st.success("✅ No quantity discrepancies found — all matched SKUs have identical counts.")
+            st.success("✅ No pure quantity discrepancies — all mismatches involve stock in other locations (see Possible Misassignment tab).")
         else:
-            # Add SKU/Title from Shopify
             if inv_df is not None:
                 sku_meta2 = inv_df.groupby("SKU_norm").agg(
                     Shopify_SKU=("SKU","first"), Title=("Title","first")
                 ).reset_index()
                 disc_df = disc_df.merge(sku_meta2, on="SKU_norm", how="left")
 
-            disc_df["Adjustment Needed"] = disc_df["Delta"].apply(
-                lambda d: f"▲ Add {d:+,} in Shopify" if d > 0 else f"▼ Remove {abs(d):,} from Shopify"
+            disc_df["Action"] = disc_df["Delta"].apply(
+                lambda d: f"▲ Add {d:+,} in Shopify Online" if d > 0
+                          else f"▼ Remove {abs(d):,} from Shopify Online"
             )
-            disc_df["Priority"] = disc_df["Delta"].abs()
 
             show_cols = {}
-            if "Shopify_SKU" in disc_df.columns:
-                show_cols["Shopify_SKU"] = "Shopify SKU"
-            if "WH_SKU" in disc_df.columns:
-                show_cols["WH_SKU"] = "WH SKU"
-            if "Title" in disc_df.columns:
-                show_cols["Title"] = "Product Title"
-            if "WH_Brand" in disc_df.columns:
-                show_cols["WH_Brand"] = "Brand"
-            if "WH_Desc" in disc_df.columns:
-                show_cols["WH_Desc"] = "WH Description"
+            if "Shopify_SKU" in disc_df.columns: show_cols["Shopify_SKU"] = "Shopify SKU"
+            if "WH_SKU"      in disc_df.columns: show_cols["WH_SKU"]      = "WH SKU"
+            if "Title"       in disc_df.columns: show_cols["Title"]        = "Product Title"
+            if "WH_Brand"    in disc_df.columns: show_cols["WH_Brand"]     = "Brand"
+            if "WH_Desc"     in disc_df.columns: show_cols["WH_Desc"]      = "WH Description"
             show_cols.update({
-                "WH_Stock":         "WH Stock",
-                "Shopify_Online":   "Shopify Online",
-                "Delta":            "Delta",
-                "Adjustment Needed":"Action",
+                "WH_Stock":       "WH Stock",
+                "Shopify_Online": "Shopify Online",
+                "Delta":          "Delta",
+                "Action":         "Action",
             })
 
             display = disc_df[list(show_cols.keys())].rename(columns=show_cols)
             display = display.sort_values("Delta", key=abs, ascending=False).reset_index(drop=True)
 
-            # Color-code: positive delta = WH higher (amber), negative = WH lower (red)
             st.dataframe(
                 display,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Delta": st.column_config.NumberColumn("Delta", format="%+d"),
-                    "WH Stock": st.column_config.NumberColumn("WH Stock"),
+                    "Delta":          st.column_config.NumberColumn("Delta", format="%+d"),
+                    "WH Stock":       st.column_config.NumberColumn("WH Stock"),
                     "Shopify Online": st.column_config.NumberColumn("Shopify Online"),
                 }
             )
-            st.caption(f"{len(display):,} SKUs with quantity discrepancy · "
-                       f"WH higher: {wh_higher:,} · WH lower: {wh_lower:,}")
+            n_higher = int((disc_df["Delta"] > 0).sum())
+            n_lower  = int((disc_df["Delta"] < 0).sum())
+            st.caption(f"{len(display):,} pure discrepancies · WH higher: {n_higher:,} · WH lower: {n_lower:,}")
 
     # ── Tab 2: WH only — not in Shopify Online ───────────────────────────
     with tab_wh_only:
@@ -775,6 +794,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             if "WH_SKU"      in misassign_df.columns: fixed["WH_SKU"]      = "WH SKU"
             if "Title"       in misassign_df.columns: fixed["Title"]        = "Product"
             if "WH_Brand"    in misassign_df.columns: fixed["WH_Brand"]     = "Brand"
+            if "Store"       in misassign_df.columns: fixed["Store"]        = "Store"
             fixed["WH_Stock"]       = "WH Stock"
             fixed["Shopify_Online"] = "Shopify Online"
 
