@@ -729,6 +729,35 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     ].copy()
     n_pure_disc = len(pure_disc_df)
 
+    # ── Lookup helpers for audit columns ─────────────────────────────────
+    # Store: SKU_norm → "CC 🚴" / "RR 🏃" / "CC+RR"
+    _cc_norm = set(inv_cc["SKU_norm"]) if inv_cc is not None else set()
+    _rr_norm = set(inv_rr["SKU_norm"]) if inv_rr is not None else set()
+    def _store_label(n):
+        c, r = n in _cc_norm, n in _rr_norm
+        if c and r: return "CC + RR"
+        if c:       return "CC 🚴"
+        if r:       return "RR 🏃"
+        return "—"
+
+    # WH Bin: SKU_norm → comma-separated bin locations from wh_df
+    _wh_bin = (
+        wh_df.groupby("SKU_norm")["WH_Bin"]
+        .apply(lambda x: ", ".join(sorted(set(str(v) for v in x if str(v) not in ("", "nan")))))
+        .reset_index()
+        .rename(columns={"WH_Bin": "WH_Location"})
+    ) if wh_df is not None else pd.DataFrame(columns=["SKU_norm","WH_Location"])
+
+    # CC Online / RR Online per SKU (for discrepancy tab detail)
+    _cc_on_by_sku = (inv_cc[inv_cc["Location"]=="Online"]
+                     .groupby("SKU_norm")["On_Hand"].sum()
+                     .reset_index().rename(columns={"On_Hand":"CC Online"})
+                    ) if inv_cc is not None else pd.DataFrame(columns=["SKU_norm","CC Online"])
+    _rr_on_by_sku = (inv_rr[inv_rr["Location"]=="Online"]
+                     .groupby("SKU_norm")["On_Hand"].sum()
+                     .reset_index().rename(columns={"On_Hand":"RR Online"})
+                    ) if inv_rr is not None else pd.DataFrame(columns=["SKU_norm","RR Online"])
+
     tab_disc, tab_wh_only, tab_sh_only, tab_wrong_loc = st.tabs([
         f"⚖️ Qty Discrepancy ({n_pure_disc:,})",
         f"🏭 WH only — add to Shopify ({len(wh_only):,})",
@@ -760,20 +789,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
                           else f"▼ Remove {abs(d):,} from Shopify Online"
             )
 
+            # Enrich with Store, WH Location, per-store Online qty
+            disc_df["Store"]  = disc_df["SKU_norm"].apply(_store_label)
+            disc_df = disc_df.merge(_wh_bin,      on="SKU_norm", how="left")
+            disc_df = disc_df.merge(_cc_on_by_sku, on="SKU_norm", how="left")
+            disc_df = disc_df.merge(_rr_on_by_sku, on="SKU_norm", how="left")
+            for col in ["CC Online","RR Online"]:
+                if col in disc_df.columns:
+                    disc_df[col] = disc_df[col].fillna(0).astype(int)
+
             show_cols = {}
-            if "Shopify_SKU" in disc_df.columns: show_cols["Shopify_SKU"] = "Shopify SKU"
-            if "WH_SKU"      in disc_df.columns: show_cols["WH_SKU"]      = "WH SKU"
-            if "Title"       in disc_df.columns: show_cols["Title"]        = "Product Title"
-            if "WH_Brand"    in disc_df.columns: show_cols["WH_Brand"]     = "Brand"
-            if "WH_Desc"     in disc_df.columns: show_cols["WH_Desc"]      = "WH Description"
+            if "Shopify_SKU"  in disc_df.columns: show_cols["Shopify_SKU"]  = "Shopify SKU"
+            if "WH_SKU"       in disc_df.columns: show_cols["WH_SKU"]       = "WH SKU"
+            if "Title"        in disc_df.columns: show_cols["Title"]         = "Product Title"
+            if "WH_Brand"     in disc_df.columns: show_cols["WH_Brand"]      = "Brand"
+            show_cols["Store"] = "Store"
+            if "WH_Location"  in disc_df.columns: show_cols["WH_Location"]  = "WH Location"
             show_cols.update({
                 "WH_Stock":       "WH Stock",
                 "Shopify_Online": "Shopify Online",
-                "Delta":          "Delta",
-                "Action":         "Action",
             })
+            if "CC Online" in disc_df.columns: show_cols["CC Online"] = "CC Online"
+            if "RR Online" in disc_df.columns: show_cols["RR Online"] = "RR Online"
+            show_cols.update({"Delta": "Delta", "Action": "Action"})
 
-            display = disc_df[list(show_cols.keys())].rename(columns=show_cols)
+            display = disc_df[[c for c in show_cols if c in disc_df.columns]].rename(columns=show_cols)
             display = display.sort_values("Delta", key=abs, ascending=False).reset_index(drop=True)
 
             st.dataframe(
@@ -784,6 +824,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
                     "Delta":          st.column_config.NumberColumn("Delta", format="%+d"),
                     "WH Stock":       st.column_config.NumberColumn("WH Stock"),
                     "Shopify Online": st.column_config.NumberColumn("Shopify Online"),
+                    "CC Online":      st.column_config.NumberColumn("CC Online"),
+                    "RR Online":      st.column_config.NumberColumn("RR Online"),
                 }
             )
             n_higher = int((disc_df["Delta"] > 0).sum())
@@ -798,18 +840,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             st.success("✅ All warehouse SKUs are reflected in Shopify Online.")
         else:
             wh_show = wh_only[["WH_SKU","WH_Brand","WH_Desc","WH_Stock"]].copy()
-            wh_show.columns = ["WH SKU","Brand","Description","WH Stock"]
-            wh_show["Action"] = "▲ Add to Shopify Online"
-            wh_show = wh_show.sort_values("WH Stock", ascending=False).reset_index(drop=True)
+            wh_show = wh_show.merge(_wh_bin, left_on=wh_only["SKU_norm"].values,
+                                    right_on=_wh_bin["SKU_norm"], how="left")                               if "SKU_norm" in wh_only.columns else wh_show
+            # Simpler approach: merge on index-aligned SKU_norm
+            wh_show2 = wh_only[["SKU_norm","WH_SKU","WH_Brand","WH_Desc","WH_Stock"]].copy()
+            wh_show2 = wh_show2.merge(_wh_bin, on="SKU_norm", how="left")
+            wh_show2["Action"] = "▲ Add to Shopify Online"
+            col_map = {"WH_SKU":"WH SKU","WH_Brand":"Brand","WH_Desc":"Description",
+                       "WH_Stock":"WH Stock","WH_Location":"WH Location"}
+            show_order = ["WH SKU","Brand","Description","WH Location","WH Stock","Action"]
+            wh_show2 = wh_show2.rename(columns=col_map)
+            wh_show2 = wh_show2[[c for c in show_order if c in wh_show2.columns]]
+            wh_show2 = wh_show2.sort_values("WH Stock", ascending=False).reset_index(drop=True)
             st.dataframe(
-                wh_show,
+                wh_show2,
                 use_container_width=True,
                 hide_index=True,
-                column_config={
-                    "WH Stock": st.column_config.NumberColumn("WH Stock"),
-                }
+                column_config={"WH Stock": st.column_config.NumberColumn("WH Stock")}
             )
-            st.caption(f"{len(wh_show):,} SKUs · {int(wh_only['WH_Stock'].sum()):,} total units not reflected in Shopify")
+            st.caption(f"{len(wh_show2):,} SKUs · {int(wh_only['WH_Stock'].sum()):,} total units not in Shopify")
 
     # ── Tab 3: Shopify Online only — not in WH ───────────────────────────
     with tab_sh_only:
@@ -827,16 +876,36 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             sh_cols.append("Shopify_Online")
             rename_sh["Shopify_Online"] = "Shopify Online Units"
 
-            sh_show = shopify_only[[c for c in sh_cols if c in shopify_only.columns]].copy()
-            sh_show = sh_show.rename(columns=rename_sh)
-            sh_show["Action"] = "🔍 Verify / Remove from Shopify"
-            sh_show = sh_show.sort_values("Shopify Online Units", ascending=False).reset_index(drop=True)
+            sh_base = shopify_only[[c for c in sh_cols if c in shopify_only.columns]].copy()
+            sh_base = sh_base.rename(columns=rename_sh)
+            # Add Store and per-store breakdown
+            sh_base["Store"] = shopify_only["SKU_norm"].apply(_store_label)
+            sh_base = sh_base.merge(
+                _cc_on_by_sku.rename(columns={"SKU_norm": "SKU_norm_x"}),
+                left_on=shopify_only["SKU_norm"].values,
+                right_on=_cc_on_by_sku["SKU_norm"].values, how="left"
+            ) if "CC Online" not in sh_base.columns else sh_base
+            # Cleaner merge
+            sh_enrich = shopify_only[["SKU_norm"]].copy()
+            sh_enrich = sh_enrich.merge(_cc_on_by_sku, on="SKU_norm", how="left")
+            sh_enrich = sh_enrich.merge(_rr_on_by_sku, on="SKU_norm", how="left")
+            for col in ["CC Online","RR Online"]:
+                sh_enrich[col] = sh_enrich[col].fillna(0).astype(int)
+            sh_base = pd.concat([sh_base.reset_index(drop=True),
+                                  sh_enrich[["CC Online","RR Online"]].reset_index(drop=True)], axis=1)
+            sh_base["Action"] = "🔍 Verify / Remove from Shopify"
+            col_order = [c for c in ["Shopify SKU","Product Title","Store",
+                                      "Shopify Online Units","CC Online","RR Online","Action"]
+                         if c in sh_base.columns]
+            sh_show = sh_base[col_order].sort_values("Shopify Online Units", ascending=False).reset_index(drop=True)
             st.dataframe(
                 sh_show,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "Shopify Online Units": st.column_config.NumberColumn("Shopify Online Units"),
+                    "CC Online":            st.column_config.NumberColumn("CC Online"),
+                    "RR Online":            st.column_config.NumberColumn("RR Online"),
                 }
             )
             st.caption(f"{len(sh_show):,} SKUs · {int(shopify_only['Shopify_Online'].sum()):,} total units in Shopify with no WH record")
