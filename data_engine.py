@@ -154,21 +154,73 @@ def parse_inventory(file) -> pd.DataFrame:
 #       Renamed to WH_Bin to avoid confusion.
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_warehouse(file) -> pd.DataFrame:
-    fname = getattr(file, "name", "")
-    if fname.lower().endswith((".xlsx", ".xls")):
-        raw = pd.read_excel(file)
-    else:
-        raw = _read_csv(file)
+    """
+    Parse the central warehouse master file (Excel or CSV).
+    Uses fuzzy column matching (strip + lowercase) to handle minor
+    header variations from different Excel exports.
+    """
+    # ── Detect file type robustly ─────────────────────────────────────────
+    fname = getattr(file, "name", "") or ""
+    raw_bytes = file.read() if hasattr(file, "read") else open(file, "rb").read()
 
-    present = [c for c in WH_COLS if c in raw.columns]
-    df = raw[present].copy().rename(columns={
-        "SKU#":      "SKU",
-        "UPC/EAN#":  "UPC",
-        "Location":  "WH_Bin",
-        "Stock Qty": "Stock_Qty",
-    })
+    if fname.lower().endswith((".xlsx", ".xls")):
+        raw = pd.read_excel(io.BytesIO(raw_bytes))
+    else:
+        # Try Excel first (some files are xlsx without extension), then CSV
+        try:
+            raw = pd.read_excel(io.BytesIO(raw_bytes))
+        except Exception:
+            enc = _detect_encoding(raw_bytes)
+            raw = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc,
+                              encoding_errors="replace", low_memory=False)
+
+    # ── Fuzzy column matching ─────────────────────────────────────────────
+    # Build a map from normalized header → actual header in file
+    col_norm_map = {c.strip().lower(): c for c in raw.columns}
+
+    # Canonical target → list of possible normalized names to try
+    TARGETS = {
+        "SKU":       ["sku#", "sku", "item code", "article", "ref"],
+        "UPC":       ["upc/ean#", "upc", "ean", "barcode"],
+        "WH_Bin":    ["location", "bin", "bin name", "loc"],
+        "Stock_Qty": ["stock qty", "stock_qty", "qty", "quantity",
+                      "stock", "on hand", "on_hand"],
+        "Brand":     ["brand"],
+        "Type":      ["type"],
+        "Description":["description", "desc", "name"],
+        "Gender":    ["gender"],
+        "Color":     ["color", "colour"],
+        "Size":      ["size"],
+    }
+
+    rename_map = {}   # actual_col → internal_name
+    for internal, candidates in TARGETS.items():
+        for cand in candidates:
+            if cand in col_norm_map:
+                actual = col_norm_map[cand]
+                if actual not in rename_map:  # first match wins
+                    rename_map[actual] = internal
+                break
+
+    df = raw[list(rename_map.keys())].copy().rename(columns=rename_map)
+
+    # ── Ensure critical columns exist ─────────────────────────────────────
+    if "SKU" not in df.columns:
+        raise ValueError(
+            f"Could not find SKU column. Headers found: {list(raw.columns)}"
+        )
+    if "Stock_Qty" not in df.columns:
+        raise ValueError(
+            f"Could not find Stock Qty column. Headers found: {list(raw.columns)}"
+        )
 
     df["Stock_Qty"] = _to_num(df["Stock_Qty"]).astype(int)
+
+    # Optional columns — fill with empty string if missing
+    for col in ["Brand", "Description", "WH_Bin", "Type", "Gender", "Color", "Size"]:
+        if col not in df.columns:
+            df[col] = ""
+
     df = df[df["SKU"].astype(str).str.strip().ne("") & df["SKU"].notna()].reset_index(drop=True)
     df["SKU_norm"] = df["SKU"].astype(str).apply(normalize_sku)
     return df
