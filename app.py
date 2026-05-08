@@ -490,7 +490,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     total_wh      = int(wh_with_stock["WH_Stock"].sum())
     match_pct     = round(exact_match / total_matched * 100, 1) if total_matched else 0
 
-    # ── Pre-compute misassignment SKUs so KPIs can split pure vs misassigned ──
+    # ── Pre-compute misassignment SKUs so KPIs align exactly with tabs ──────
+    # Build _non_online_skus: every SKU with stock in any non-Online location
     _non_online_skus = set()
     if inv_df is not None:
         _all_loc_pre = inv_df.groupby(["SKU_norm","Location"])["On_Hand"].sum().reset_index()
@@ -499,18 +500,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         ]
         _non_online_skus = set(_non_online_pre["SKU_norm"])
 
-    # Split matched discrepancies into pure vs misassignment
-    disc_mask   = in_both["Delta"] != 0
-    missass_mask = in_both["SKU_norm"].isin(_non_online_skus)
+    # misassign_skus_pre = discrepancy OR wh-only candidates that also have non-Online stock
+    # This is the SAME logic as misassign_df — computed here so KPIs match tab counts exactly
+    _disc_candidate_skus = set(in_both[in_both["Delta"] != 0]["SKU_norm"]) | set(wh_only["SKU_norm"])
+    misassign_skus_pre   = _disc_candidate_skus & _non_online_skus
+
+    # Split matched discrepancies: pure = delta≠0 AND not a misassignment candidate
+    disc_mask    = in_both["Delta"] != 0
+    missass_mask = in_both["SKU_norm"].isin(misassign_skus_pre)
     pure_wh_higher  = int(((in_both["Delta"] > 0) & ~missass_mask).sum())
     pure_wh_lower   = int(((in_both["Delta"] < 0) & ~missass_mask).sum())
     missass_matched = int((disc_mask & missass_mask).sum())
 
     # WH-only: split pure vs misassignment
-    wh_only_missass = int(wh_only["SKU_norm"].isin(_non_online_skus).sum())
+    wh_only_missass = int(wh_only["SKU_norm"].isin(misassign_skus_pre).sum())
     wh_only_pure    = len(wh_only) - wh_only_missass
 
-    total_pure_disc   = pure_wh_higher + pure_wh_lower + wh_only_pure
+    # These now match the tab counts exactly:
+    #   total_pure_disc   → ⚖️ Qty Discrepancy tab  (pure_disc_df uses misassign_skus from same logic)
+    #   total_misassigned → 📍 Possible Misassignment tab
+    total_pure_disc   = pure_wh_higher + pure_wh_lower
     total_misassigned = missass_matched + wh_only_missass
 
     # ── Accuracy KPI HTML cards ───────────────────────────────────────────
@@ -575,9 +584,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="sub">WH qty = Shopify Online qty</div>
   </div>
   <div class="card card-amber">
-    <div class="lbl">⚖️ Pure discrepancy</div>
+    <div class="lbl">⚖️ Pure discrepancy (SKUs)</div>
     <div class="val val-amber">{total_pure_disc:,}</div>
-    <div class="sub">True qty mismatch — needs Shopify adjustment</div>
+    <div class="sub">Matched SKUs with qty mismatch, no other location stock</div>
   </div>
   <div class="card" style="background:#f0f4ff;border-color:#b0c4f5;">
     <div class="lbl">📍 Possible misassignment</div>
@@ -616,7 +625,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
 </div></body></html>"""
 
-    components.html(html_acc, height=390, scrolling=False)
+    components.html(html_acc, height=480, scrolling=False)
 
     # ══════════════════════════════════════════════════════════════════════
     # SECTION 3 — INVENTORY REPORT  (discrepancy detail)
