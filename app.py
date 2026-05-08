@@ -876,28 +876,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             sh_cols.append("Shopify_Online")
             rename_sh["Shopify_Online"] = "Shopify Online Units"
 
-            sh_base = shopify_only[[c for c in sh_cols if c in shopify_only.columns]].copy()
-            sh_base = sh_base.rename(columns=rename_sh)
-            # Add Store and per-store breakdown
-            sh_base["Store"] = shopify_only["SKU_norm"].apply(_store_label)
-            sh_base = sh_base.merge(
-                _cc_on_by_sku.rename(columns={"SKU_norm": "SKU_norm_x"}),
-                left_on=shopify_only["SKU_norm"].values,
-                right_on=_cc_on_by_sku["SKU_norm"].values, how="left"
-            ) if "CC Online" not in sh_base.columns else sh_base
-            # Cleaner merge
-            sh_enrich = shopify_only[["SKU_norm"]].copy()
-            sh_enrich = sh_enrich.merge(_cc_on_by_sku, on="SKU_norm", how="left")
-            sh_enrich = sh_enrich.merge(_rr_on_by_sku, on="SKU_norm", how="left")
-            for col in ["CC Online","RR Online"]:
-                sh_enrich[col] = sh_enrich[col].fillna(0).astype(int)
-            sh_base = pd.concat([sh_base.reset_index(drop=True),
-                                  sh_enrich[["CC Online","RR Online"]].reset_index(drop=True)], axis=1)
-            sh_base["Action"] = "🔍 Verify / Remove from Shopify"
+            # Build clean display from scratch using SKU_norm as key
+            sh_show = shopify_only[["SKU_norm"]].copy().reset_index(drop=True)
+            if "SKU"   in shopify_only.columns: sh_show["Shopify SKU"]  = shopify_only["SKU"].values
+            if "Title" in shopify_only.columns: sh_show["Product Title"] = shopify_only["Title"].values
+            sh_show["Shopify Online Units"] = shopify_only["Shopify_Online"].values
+            sh_show["Store"]    = sh_show["SKU_norm"].apply(_store_label)
+            sh_show = sh_show.merge(_cc_on_by_sku, on="SKU_norm", how="left")
+            sh_show = sh_show.merge(_rr_on_by_sku, on="SKU_norm", how="left")
+            sh_show["CC Online"] = sh_show["CC Online"].fillna(0).astype(int)
+            sh_show["RR Online"] = sh_show["RR Online"].fillna(0).astype(int)
+            sh_show["Action"] = "🔍 Verify / Remove from Shopify"
             col_order = [c for c in ["Shopify SKU","Product Title","Store",
-                                      "Shopify Online Units","CC Online","RR Online","Action"]
-                         if c in sh_base.columns]
-            sh_show = sh_base[col_order].sort_values("Shopify Online Units", ascending=False).reset_index(drop=True)
+                                     "Shopify Online Units","CC Online","RR Online","Action"]
+                         if c in sh_show.columns]
+            sh_show = sh_show[col_order].sort_values("Shopify Online Units", ascending=False).reset_index(drop=True)
             st.dataframe(
                 sh_show,
                 use_container_width=True,
