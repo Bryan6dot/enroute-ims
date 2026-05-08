@@ -579,7 +579,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 </div>
 </div></body></html>"""
 
-    components.html(html_acc, height=300, scrolling=False)
+    components.html(html_acc, height=480, scrolling=False)
 
     # ══════════════════════════════════════════════════════════════════════
     # SECTION 3 — INVENTORY REPORT  (discrepancy detail)
