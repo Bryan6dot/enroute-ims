@@ -808,6 +808,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
             fixed["Status"]           = "WH vs Shopify Total"
 
             all_cols = list(fixed.keys()) + loc_cols
+            # Deduplicate columns before rename (pivot may produce collisions)
+            seen_cols = {}
+            dedup_cols = []
+            for c in misassign_df.columns:
+                if c in seen_cols:
+                    seen_cols[c] += 1
+                    dedup_cols.append(f"{c}_{seen_cols[c]}")
+                else:
+                    seen_cols[c] = 0
+                    dedup_cols.append(c)
+            misassign_df.columns = dedup_cols
+
+            # Re-derive loc_cols after dedup
+            reserved = {"SKU_norm","Shopify_SKU","WH_SKU","Title","WH_Desc","WH_Brand",
+                        "Store","WH_Stock","Shopify_Online","Shopify_Other_Locs",
+                        "Shopify_All_Locs","Status","_merge","CC_Online","RR_Online"}
+            loc_cols = [c for c in misassign_df.columns if c not in reserved
+                        and not c.startswith("SKU_norm")]
+
+            all_cols = list(fixed.keys()) + loc_cols
             display_ma = misassign_df[[c for c in all_cols if c in misassign_df.columns]].copy()
             display_ma = display_ma.rename(columns=fixed)
 
