@@ -159,16 +159,33 @@ def parse_warehouse(file) -> pd.DataFrame:
     Uses fuzzy column matching (strip + lowercase) to handle minor
     header variations from different Excel exports.
     """
-    # ── Detect file type robustly ─────────────────────────────────────────
+    # ── Read raw bytes (reset cursor first — Streamlit UploadedFile may be at EOF) ──
     fname = getattr(file, "name", "") or ""
+    if hasattr(file, "seek"):
+        file.seek(0)
     raw_bytes = file.read() if hasattr(file, "read") else open(file, "rb").read()
 
+    # ── Parse as Excel or CSV ─────────────────────────────────────────────
+    def _try_excel(b):
+        """Try reading Excel; if first row is all Unnamed, try header=None and detect header row."""
+        df = pd.read_excel(io.BytesIO(b), engine="openpyxl")
+        # Detect if headers were missed (all Unnamed columns)
+        if all(str(c).startswith("Unnamed") for c in df.columns):
+            # Read without header and find the first row that looks like headers
+            df_raw = pd.read_excel(io.BytesIO(b), header=None, engine="openpyxl")
+            for i, row in df_raw.iterrows():
+                vals = [str(v).strip() for v in row.values if str(v).strip() not in ("", "nan")]
+                if len(vals) >= 3:  # found a meaningful header row
+                    df = pd.read_excel(io.BytesIO(b), header=i, engine="openpyxl")
+                    break
+        return df
+
     if fname.lower().endswith((".xlsx", ".xls")):
-        raw = pd.read_excel(io.BytesIO(raw_bytes))
+        raw = _try_excel(raw_bytes)
     else:
-        # Try Excel first (some files are xlsx without extension), then CSV
+        # Try Excel first, then CSV
         try:
-            raw = pd.read_excel(io.BytesIO(raw_bytes))
+            raw = _try_excel(raw_bytes)
         except Exception:
             enc = _detect_encoding(raw_bytes)
             raw = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc,
