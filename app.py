@@ -490,6 +490,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     total_wh      = int(wh_with_stock["WH_Stock"].sum())
     match_pct     = round(exact_match / total_matched * 100, 1) if total_matched else 0
 
+    # ── Pre-compute misassignment SKUs so KPIs can split pure vs misassigned ──
+    _non_online_skus = set()
+    if inv_df is not None:
+        _all_loc_pre = inv_df.groupby(["SKU_norm","Location"])["On_Hand"].sum().reset_index()
+        _non_online_pre = _all_loc_pre[
+            (_all_loc_pre["Location"] != "Online") & (_all_loc_pre["On_Hand"] > 0)
+        ]
+        _non_online_skus = set(_non_online_pre["SKU_norm"])
+
+    # Split matched discrepancies into pure vs misassignment
+    disc_mask   = in_both["Delta"] != 0
+    missass_mask = in_both["SKU_norm"].isin(_non_online_skus)
+    pure_wh_higher  = int(((in_both["Delta"] > 0) & ~missass_mask).sum())
+    pure_wh_lower   = int(((in_both["Delta"] < 0) & ~missass_mask).sum())
+    missass_matched = int((disc_mask & missass_mask).sum())
+
+    # WH-only: split pure vs misassignment
+    wh_only_missass = int(wh_only["SKU_norm"].isin(_non_online_skus).sum())
+    wh_only_pure    = len(wh_only) - wh_only_missass
+
+    total_pure_disc   = pure_wh_higher + pure_wh_lower + wh_only_pure
+    total_misassigned = missass_matched + wh_only_missass
+
     # ── Accuracy KPI HTML cards ───────────────────────────────────────────
     css_acc = """
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -521,6 +544,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     html_acc = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>{css_acc}</style></head><body><div class="wrap">
 <div class="sec-lbl">Inventory accuracy — Warehouse vs Shopify Online</div>
+
 <div class="row">
   <div class="card">
     <div class="lbl">Shopify Online SKUs (valued)</div>
@@ -543,43 +567,56 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="sub">exact qty match / matched SKUs</div>
   </div>
 </div>
-<div class="row3">
+
+<div class="row">
   <div class="card card-green">
     <div class="lbl">✅ Exact match</div>
     <div class="val val-green">{exact_match:,}</div>
     <div class="sub">WH qty = Shopify Online qty</div>
   </div>
   <div class="card card-amber">
-    <div class="lbl">⬆ WH &gt; Shopify Online</div>
-    <div class="val val-amber">{wh_higher:,}</div>
-    <div class="sub">Warehouse has more units than Shopify</div>
+    <div class="lbl">⚖️ Pure discrepancy</div>
+    <div class="val val-amber">{total_pure_disc:,}</div>
+    <div class="sub">True qty mismatch — needs Shopify adjustment</div>
   </div>
-  <div class="card card-red">
-    <div class="lbl">⬇ WH &lt; Shopify Online</div>
-    <div class="val val-red">{wh_lower:,}</div>
-    <div class="sub">Shopify shows more units than warehouse</div>
-  </div>
-</div>
-<div class="row3">
-  <div class="card card-red">
-    <div class="lbl">🏭 WH only — not in Shopify Online</div>
-    <div class="val val-amber">{len(wh_only):,}</div>
-    <div class="sub">Physical stock missing in Shopify Online</div>
+  <div class="card" style="background:#f0f4ff;border-color:#b0c4f5;">
+    <div class="lbl">📍 Possible misassignment</div>
+    <div class="val" style="color:#2255CC;">{total_misassigned:,}</div>
+    <div class="sub">Has stock in other locations — may not be a real error</div>
   </div>
   <div class="card card-amber">
     <div class="lbl">🛍 Shopify only — not in WH</div>
     <div class="val val-red">{len(shopify_only):,}</div>
     <div class="sub">Shopify Online has stock, WH file doesn't</div>
   </div>
-  <div class="card">
-    <div class="lbl">📋 Total discrepancies</div>
-    <div class="val">{wh_higher + wh_lower + len(wh_only) + len(shopify_only):,}</div>
-    <div class="sub">SKUs requiring review or adjustment</div>
+</div>
+
+<div class="row">
+  <div class="card card-amber">
+    <div class="lbl">⬆ WH &gt; Shopify (pure)</div>
+    <div class="val val-amber">{pure_wh_higher:,}</div>
+    <div class="sub">Add units to Shopify Online</div>
+  </div>
+  <div class="card card-red">
+    <div class="lbl">⬇ WH &lt; Shopify (pure)</div>
+    <div class="val val-red">{pure_wh_lower:,}</div>
+    <div class="sub">Remove units from Shopify Online</div>
+  </div>
+  <div class="card card-red">
+    <div class="lbl">🏭 WH only — pure (not in Shopify)</div>
+    <div class="val val-amber">{wh_only_pure:,}</div>
+    <div class="sub">No other location stock — add to Shopify Online</div>
+  </div>
+  <div class="card" style="background:#f0f4ff;border-color:#b0c4f5;">
+    <div class="lbl">🏭 WH only — possible misassignment</div>
+    <div class="val" style="color:#2255CC;">{wh_only_missass:,}</div>
+    <div class="sub">WH stock exists + other Shopify locations have stock</div>
   </div>
 </div>
+
 </div></body></html>"""
 
-    components.html(html_acc, height=480, scrolling=False)
+    components.html(html_acc, height=390, scrolling=False)
 
     # ══════════════════════════════════════════════════════════════════════
     # SECTION 3 — INVENTORY REPORT  (discrepancy detail)
