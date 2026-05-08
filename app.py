@@ -587,10 +587,67 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     st.markdown("### 📋 Inventory Report")
     st.caption("Discrepancies between Warehouse master file and Shopify Online location. Use this to adjust stock in Shopify.")
 
-    tab_disc, tab_wh_only, tab_sh_only = st.tabs([
+    # ── Pre-compute: possible misassignment ─────────────────────────────────
+    # SKUs where WH has stock (or discrepancy) AND Shopify has units in OTHER
+    # locations (not Online) — suggesting the stock may be wrongly assigned.
+    misassign_df = pd.DataFrame()
+    if inv_df is not None:
+        all_loc = inv_df.groupby(["SKU_norm","Location"])["On_Hand"].sum().reset_index()
+        non_online = all_loc[all_loc["Location"] != "Online"].copy()
+        non_online_agg = (non_online.groupby("SKU_norm")["On_Hand"]
+                          .sum().reset_index()
+                          .rename(columns={"On_Hand":"Shopify_Other_Locs"}))
+
+        # Candidates: WH-only rows + discrepancy rows
+        disc_base = in_both[in_both["Delta"] != 0][
+            ["SKU_norm","WH_SKU","WH_Desc","WH_Brand","WH_Stock","Shopify_Online"]].copy()
+        wh_base = wh_only[["SKU_norm","WH_SKU","WH_Desc","WH_Brand","WH_Stock"]].copy()
+        wh_base["Shopify_Online"] = 0
+        candidates = pd.concat([disc_base, wh_base], ignore_index=True)
+
+        # Keep only those with stock in non-Online locations
+        candidates = candidates.merge(non_online_agg, on="SKU_norm", how="inner")
+        candidates = candidates[candidates["Shopify_Other_Locs"] > 0].copy()
+
+        if not candidates.empty:
+            # Add Shopify SKU + Title
+            sku_meta3 = inv_df.groupby("SKU_norm").agg(
+                Shopify_SKU=("SKU","first"), Title=("Title","first")
+            ).reset_index()
+            candidates = candidates.merge(sku_meta3, on="SKU_norm", how="left")
+
+            # Pivot non-Online locations as individual columns
+            pivot_skus = non_online[non_online["SKU_norm"].isin(candidates["SKU_norm"])].copy()
+            loc_pivot = pivot_skus.pivot_table(
+                index="SKU_norm", columns="Location",
+                values="On_Hand", aggfunc="sum", fill_value=0
+            ).reset_index()
+            loc_pivot.columns.name = None
+            candidates = candidates.merge(loc_pivot, on="SKU_norm", how="left")
+
+            # Total Shopify across ALL locations
+            all_agg = (all_loc.groupby("SKU_norm")["On_Hand"]
+                       .sum().reset_index()
+                       .rename(columns={"On_Hand":"Shopify_All_Locs"}))
+            candidates = candidates.merge(all_agg, on="SKU_norm", how="left")
+            candidates["Shopify_All_Locs"] = candidates["Shopify_All_Locs"].fillna(0).astype(int)
+
+            candidates["Status"] = candidates.apply(
+                lambda r: "✅ Total matches WH" if r["WH_Stock"] == r["Shopify_All_Locs"]
+                else (f"⬆ WH has {r['WH_Stock']-r['Shopify_All_Locs']:+,} more"
+                      if r["WH_Stock"] > r["Shopify_All_Locs"]
+                      else f"⬇ Shopify has {r['Shopify_All_Locs']-r['WH_Stock']:+,} more"),
+                axis=1
+            )
+            misassign_df = candidates.copy()
+
+    n_misassign = len(misassign_df)
+
+    tab_disc, tab_wh_only, tab_sh_only, tab_wrong_loc = st.tabs([
         f"⚖️ Qty Discrepancy ({wh_higher + wh_lower:,})",
         f"🏭 WH only — add to Shopify ({len(wh_only):,})",
         f"🛍 Shopify only — review ({len(shopify_only):,})",
+        f"📍 Possible Misassignment ({n_misassign:,})",
     ])
 
     # ── Tab 1: Qty discrepancy (matched but different qty) ────────────────
@@ -698,6 +755,71 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
                 }
             )
             st.caption(f"{len(sh_show):,} SKUs · {int(shopify_only['Shopify_Online'].sum()):,} total units in Shopify with no WH record")
+
+    # ── Tab 4: Possible misassignment ─────────────────────────────────────
+    with tab_wrong_loc:
+        st.caption(
+            "SKUs where the **Shopify Online location shows 0** (or a discrepancy vs WH), "
+            "but the SKU **has stock in other Shopify locations**. "
+            "The physical units may simply be assigned to the wrong location in Shopify. "
+            "Review and move stock to the Online location if it physically sits in the warehouse."
+        )
+
+        if misassign_df.empty:
+            st.success("✅ No potential misassignments detected.")
+        else:
+            # Build display columns dynamically
+            # Fixed columns first
+            fixed = {}
+            if "Shopify_SKU" in misassign_df.columns: fixed["Shopify_SKU"] = "Shopify SKU"
+            if "WH_SKU"      in misassign_df.columns: fixed["WH_SKU"]      = "WH SKU"
+            if "Title"       in misassign_df.columns: fixed["Title"]        = "Product"
+            if "WH_Brand"    in misassign_df.columns: fixed["WH_Brand"]     = "Brand"
+            fixed["WH_Stock"]       = "WH Stock"
+            fixed["Shopify_Online"] = "Shopify Online"
+
+            # Dynamic location columns (all non-standard columns = Shopify locations)
+            reserved = {"SKU_norm","Shopify_SKU","WH_SKU","Title","WH_Desc","WH_Brand",
+                        "WH_Stock","Shopify_Online","Shopify_Other_Locs",
+                        "Shopify_All_Locs","Status","_merge","CC_Online","RR_Online"}
+            loc_cols = [c for c in misassign_df.columns if c not in reserved]
+
+            fixed["Shopify_All_Locs"] = "Shopify Total (all locs)"
+            fixed["Status"]           = "WH vs Shopify Total"
+
+            all_cols = list(fixed.keys()) + loc_cols
+            display_ma = misassign_df[[c for c in all_cols if c in misassign_df.columns]].copy()
+            display_ma = display_ma.rename(columns=fixed)
+
+            # Highlight "Total matches WH" rows
+            total_match  = (misassign_df["Status"].str.startswith("✅")).sum()
+            total_higher = (misassign_df["Status"].str.startswith("⬆")).sum()
+            total_lower  = (misassign_df["Status"].str.startswith("⬇")).sum()
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("✅ Total matches WH (wrong loc only)", total_match,
+                      help="WH stock = total Shopify stock — just in wrong location")
+            m2.metric("⬆ WH still has more",  total_higher,
+                      help="Even counting all locations, WH has more")
+            m3.metric("⬇ Shopify still has more", total_lower,
+                      help="Even counting all locations, Shopify total exceeds WH")
+
+            st.dataframe(
+                display_ma.sort_values("WH Stock", ascending=False).reset_index(drop=True),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "WH Stock":               st.column_config.NumberColumn("WH Stock"),
+                    "Shopify Online":         st.column_config.NumberColumn("Shopify Online"),
+                    "Shopify Total (all locs)":st.column_config.NumberColumn("Shopify Total (all locs)"),
+                    **{c: st.column_config.NumberColumn(c) for c in loc_cols if c in display_ma.columns}
+                }
+            )
+            st.caption(
+                f"{len(display_ma):,} SKUs flagged · "
+                f"{total_match:,} are likely just wrong location · "
+                f"Action: move stock to **Online** location in Shopify"
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
