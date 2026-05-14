@@ -24,6 +24,7 @@ try:
         validate_inventory_file, validate_orders_file,
         parse_warehouse, validate_warehouse_file,
         cross_reference, _loc_stats,
+        find_sku_errors,
     )
     ENGINE_OK = True
 except ImportError as _ie:
@@ -500,7 +501,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     ].copy()
     if inv_df is not None:
         shopify_only = shopify_only.merge(sku_meta, on="SKU_norm", how="left")
-
+    
+    # ── Possible SKU errors ───────────────────────────────────────────────────
+    sku_errors = find_sku_errors(wh_only, shopify_only)
+    
     # Core accuracy metrics
     exact_match   = int((in_both["Delta"] == 0).sum())
     wh_higher     = int((in_both["Delta"] >  0).sum())
@@ -988,7 +992,38 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
                 f"{total_match:,} are likely just wrong location · "
                 f"Action: move stock to **Online** location in Shopify"
             )
-
+# ── Possible SKU errors ───────────────────────────────────────────────
+    st.divider()
+    err_count = sku_errors["WH_SKU"].nunique() if not sku_errors.empty else 0
+    with st.expander(f"🔁 Possible SKU errors — {err_count} SKUs", expanded=False):
+        if sku_errors.empty:
+            st.success("✅ No se encontraron candidatos.")
+        else:
+            st.caption(
+                "SKUs que no matchearon exacto pero el WH SKU está contenido dentro del Shopify SKU "
+                "(o viceversa). Probablemente el mismo producto con prefijo, sufijo o dígito diferente."
+            )
+            def _delta_color(val):
+                if val > 0: return "color: #198754"
+                if val < 0: return "color: #dc3545"
+                return ""
+            st.dataframe(
+                sku_errors.style.map(_delta_color, subset=["Qty_Delta"]),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Qty_Delta":      st.column_config.NumberColumn("Delta (WH − Shopify)"),
+                    "WH_Stock":       st.column_config.NumberColumn("WH Qty"),
+                    "Shopify_OnHand": st.column_config.NumberColumn("Shopify Online Qty"),
+                },
+            )
+            st.download_button(
+                "⬇ Descargar",
+                sku_errors.to_csv(index=False).encode(),
+                "possible_sku_errors.csv",
+                "text/csv",
+                key="dl_sku_errors",
+            )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: INVENTORY CONTROL
