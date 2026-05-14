@@ -545,7 +545,11 @@ def find_sku_errors(
     wh["_norm"] = wh["WH_SKU"].apply(normalize_sku)
 
     sh = shopify_only.copy()
-    sh["_norm"] = sh["Shopify_SKU"].apply(normalize_sku)
+    # columnas flexibles — app.py usa SKU/Shopify_Online/Title
+    sku_col   = "SKU"            if "SKU"            in sh.columns else "Shopify_SKU"
+    qty_col   = "Shopify_Online" if "Shopify_Online"  in sh.columns else "Shopify_On_Hand"
+    title_col = "Title"          if "Title"           in sh.columns else "Shopify_Title"
+    sh["_norm"] = sh[sku_col].apply(normalize_sku)
 
     rows = []
     for _, w in wh.iterrows():
@@ -558,7 +562,7 @@ def find_sku_errors(
                 continue
 
             if wn in sn:
-                match_type = "WH ⊂ Shopify"          # CC agrega prefijo/sufijo
+                match_type = "WH ⊂ Shopify"
             elif sn in wn:
                 match_type = "Shopify ⊂ WH"
             else:
@@ -567,13 +571,12 @@ def find_sku_errors(
             rows.append({
                 "WH_SKU":         w["WH_SKU"],
                 "WH_Stock":       int(w["WH_Stock"]),
-                "Shopify_SKU":    s["Shopify_SKU"],
-                "Shopify_Title":  s.get("Shopify_Title", ""),
-                "Shopify_OnHand": int(s["Shopify_On_Hand"]),
-                "Qty_Delta":      int(w["WH_Stock"]) - int(s["Shopify_On_Hand"]),
+                "Shopify_SKU":    s[sku_col],
+                "Shopify_Title":  s.get(title_col, ""),
+                "Shopify_OnHand": int(s[qty_col]),
+                "Qty_Delta":      int(w["WH_Stock"]) - int(s[qty_col]),
                 "Match_Type":     match_type,
             })
-
     if not rows:
         return pd.DataFrame()
 
