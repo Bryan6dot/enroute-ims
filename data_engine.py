@@ -471,15 +471,19 @@ def _loc_stats(inv_df: pd.DataFrame):
 # POSSIBLE SKU ERRORS — fuzzy match between WH-only and Shopify-only SKUs
 #
 # Called from app.py as:
-#   find_sku_errors(_wh_e, _sh_e)
-#
-# where _wh_e = wh_only enriched with WH_Location (via _wh_bin merge)
-# and   _sh_e = shopify_only enriched with Store + CC_Online / RR_Online
+#   find_sku_errors(_wh_e, _sh_e, inv_df=inv_df)
 #
 # Input columns
 # -------------
-# wh_only_df    : SKU_norm, WH_SKU, WH_Brand, WH_Desc, WH_Stock, [WH_Location]
-# shopify_only_df: SKU_norm, SKU, Title, Shopify_Online, CC_Online, RR_Online, [Store]
+# wh_only_df    : SKU_norm, WH_SKU, WH_Desc, WH_Stock, [WH_Location]
+# shopify_only_df: SKU_norm, SKU, Title
+# inv_df        : full combined Shopify inventory — used for per-location pivot
+#
+# Output columns (exact spec)
+# ---------------------------
+# WH_SKU | Shopify_SKU | Shopify_Title | WH_Description | WH Location |
+# Online | In Store | Reserve Instore | Reserve Warehouse | SLG | SLG Hong Kong |
+# WH_Stock | Shopify_OnHand | Qty_Delta | Match_Type
 #
 # Match types detected
 # --------------------
@@ -487,81 +491,107 @@ def _loc_stats(inv_df: pd.DataFrame):
 #   Leading zero   — one side has an extra leading 0
 #   Substring      — one SKU_norm contains the other (min 5 chars)
 # ══════════════════════════════════════════════════════════════════════════════
+
+# Shopify locations shown as individual columns in the SKU errors table
+SHOPIFY_STOCK_LOCS = [
+    "Online", "In Store", "Reserve Instore",
+    "Reserve Warehouse", "SLG", "SLG Hong Kong",
+]
+
 def find_sku_errors(
     wh_only_df: pd.DataFrame,
     shopify_only_df: pd.DataFrame,
+    inv_df: pd.DataFrame = None,
 ) -> pd.DataFrame:
     GENDER = ['m', 'w', 'u', 'k']
     EMPTY_COLS = [
-        'Shopify SKU', 'Product Title', 'Store', 'Shopify Online',
-        'CC Online', 'RR Online', 'WH SKU', 'Brand', 'Description',
-        'WH Location', 'WH Stock', 'Match Type',
+        'WH_SKU', 'Shopify_SKU', 'Shopify_Title', 'WH_Description',
+        'WH Location',
+        *SHOPIFY_STOCK_LOCS,
+        'WH_Stock', 'Shopify_OnHand', 'Qty_Delta', 'Match_Type',
     ]
 
     if (wh_only_df is None or shopify_only_df is None
             or wh_only_df.empty or shopify_only_df.empty):
         return pd.DataFrame(columns=EMPTY_COLS)
 
-    # Build lookup: SKU_norm → row (Series)
-    sh_map = {str(row['SKU_norm']): row for _, row in shopify_only_df.iterrows()}
+    # ── Per-location stock pivot from full inv_df (CC + RR summed) ───────────
+    # loc_pivot: SKU_norm → {location_name: on_hand_total}
+    loc_pivot: dict[str, dict[str, int]] = {}
+    if inv_df is not None and not inv_df.empty:
+        grp = (
+            inv_df.groupby(["SKU_norm", "Location"])["On_Hand"]
+            .sum().reset_index()
+        )
+        for _, row in grp.iterrows():
+            loc_pivot.setdefault(str(row["SKU_norm"]), {})[row["Location"]] = int(row["On_Hand"])
+
+    # ── Shopify-only lookup: SKU_norm → row ──────────────────────────────────
+    sh_map = {str(row["SKU_norm"]): row for _, row in shopify_only_df.iterrows()}
 
     rows = []
     for _, wh in wh_only_df.iterrows():
-        nw         = str(wh['SKU_norm'])
+        nw         = str(wh["SKU_norm"])
         match_type = None
         sh_row     = None
 
         # 1. Gender prefix — strip from WH SKU_norm
         for p in GENDER:
             if nw.startswith(p) and nw[1:] in sh_map:
-                sh_row, match_type = sh_map[nw[1:]], f'Gender prefix ({p.upper()} stripped)'
+                sh_row, match_type = sh_map[nw[1:]], f"Gender prefix ({p.upper()} stripped)"
                 break
 
         # 2. Gender prefix — add to WH SKU_norm
         if not match_type:
             for p in GENDER:
                 if (p + nw) in sh_map:
-                    sh_row, match_type = sh_map[p + nw], f'Gender prefix ({p.upper()} added)'
+                    sh_row, match_type = sh_map[p + nw], f"Gender prefix ({p.upper()} added)"
                     break
 
         # 3. Leading zeros — WH has the extra zero
         if not match_type:
-            stripped = nw.lstrip('0')
+            stripped = nw.lstrip("0")
             if stripped and stripped != nw and stripped in sh_map:
-                sh_row, match_type = sh_map[stripped], 'Leading zero (WH extra)'
+                sh_row, match_type = sh_map[stripped], "Leading zero (WH extra)"
 
         # 4. Leading zeros — Shopify has the extra zero
         if not match_type:
-            if ('0' + nw) in sh_map:
-                sh_row, match_type = sh_map['0' + nw], 'Leading zero (Shopify extra)'
+            if ("0" + nw) in sh_map:
+                sh_row, match_type = sh_map["0" + nw], "Leading zero (Shopify extra)"
 
         # 5. Substring (min 5 chars to reduce noise)
         if not match_type and len(nw) >= 5:
             for sh_n, sh_r in sh_map.items():
                 if sh_n != nw and (nw in sh_n or sh_n in nw):
-                    sh_row, match_type = sh_r, 'Substring'
+                    sh_row, match_type = sh_r, "Substring"
                     break
 
         if not match_type:
             continue
 
-        rows.append({
-            'Shopify SKU':    sh_row.get('SKU',          sh_row.get('SKU_norm', '—')),
-            'Product Title':  sh_row.get('Title',        '—'),
-            'Store':          sh_row.get('Store',        '—'),
-            'Shopify Online': int(sh_row.get('Shopify_Online', 0)),
-            'CC Online':      int(sh_row.get('CC_Online',      0)),
-            'RR Online':      int(sh_row.get('RR_Online',      0)),
-            'WH SKU':         wh.get('WH_SKU',      '—'),
-            'Brand':          wh.get('WH_Brand',    '—'),
-            'Description':    wh.get('WH_Desc',     '—'),
-            'WH Location':    wh.get('WH_Location', '—'),
-            'WH Stock':       int(wh.get('WH_Stock', 0)),
-            'Match Type':     match_type,
-        })
+        sh_norm     = str(sh_row["SKU_norm"])
+        sh_locs     = loc_pivot.get(sh_norm, {})
+        sh_on_hand  = sum(sh_locs.values())
+        wh_stock    = int(wh.get("WH_Stock", 0))
+
+        row: dict = {
+            "WH_SKU":         wh.get("WH_SKU",      "—"),
+            "Shopify_SKU":    sh_row.get("SKU",      sh_row.get("SKU_norm", "—")),
+            "Shopify_Title":  sh_row.get("Title",    "—"),
+            "WH_Description": wh.get("WH_Desc",     "—"),
+            "WH Location":    wh.get("WH_Location",  "—"),
+        }
+        for loc in SHOPIFY_STOCK_LOCS:
+            row[loc] = sh_locs.get(loc, 0)
+
+        row["WH_Stock"]       = wh_stock
+        row["Shopify_OnHand"] = sh_on_hand
+        row["Qty_Delta"]      = wh_stock - sh_on_hand
+        row["Match_Type"]     = match_type
+        rows.append(row)
 
     return (
-        pd.DataFrame(rows).sort_values('WH Stock', ascending=False).reset_index(drop=True)
+        pd.DataFrame(rows).sort_values("WH_Stock", ascending=False).reset_index(drop=True)
         if rows else pd.DataFrame(columns=EMPTY_COLS)
     )
 
