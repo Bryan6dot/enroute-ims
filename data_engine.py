@@ -126,12 +126,11 @@ def _to_num(series: pd.Series) -> pd.Series:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SHOPIFY INVENTORY PARSER  (CC or RR)
-# Extra columns (Fisical, Warehouse_location, Validated, etc.) are ignored.
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_inventory(file) -> pd.DataFrame:
-    raw = _read_csv(file)
+    raw  = _read_csv(file)
     keep = [c for c in SHOPIFY_INV_COLS if c in raw.columns]
-    df = raw[keep].copy().rename(columns=INV_RENAME)
+    df   = raw[keep].copy().rename(columns=INV_RENAME)
 
     for col in ["Incoming", "Unavailable", "Committed", "Available", "On_Hand"]:
         df[col] = _to_num(df[col]) if col in df.columns else 0
@@ -141,7 +140,8 @@ def parse_inventory(file) -> pd.DataFrame:
     def _variant(row):
         parts = [str(row.get(f"Option{i}_Value", "")) for i in range(1, 4)]
         return " / ".join(p for p in parts if p.strip() not in ["", "nan"])
-    df["Variant"] = df.apply(_variant, axis=1)
+
+    df["Variant"]  = df.apply(_variant, axis=1)
     df["SKU_norm"] = df["SKU"].apply(normalize_sku)
     return df
 
@@ -150,8 +150,9 @@ def parse_inventory(file) -> pd.DataFrame:
 # WAREHOUSE PARSER
 # Columns: Brand | Type | Description | Gender | Color | Size |
 #          SKU#  | UPC/EAN# | Location | Stock Qty
-# NOTE: 'Location' here is a physical bin (e.g. A7-03), NOT a Shopify location.
-#       Renamed to WH_Bin to avoid confusion.
+# NOTE: 'Location' in the WH file is a physical bin (e.g. A7-03), NOT a
+#       Shopify location. Renamed to WH_Bin to avoid collision with Shopify's
+#       'Location' column.
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_warehouse(file) -> pd.DataFrame:
     """
@@ -159,23 +160,18 @@ def parse_warehouse(file) -> pd.DataFrame:
     Uses fuzzy column matching (strip + lowercase) to handle minor
     header variations from different Excel exports.
     """
-    # ── Read raw bytes (reset cursor first — Streamlit UploadedFile may be at EOF) ──
     fname = getattr(file, "name", "") or ""
     if hasattr(file, "seek"):
         file.seek(0)
     raw_bytes = file.read() if hasattr(file, "read") else open(file, "rb").read()
 
-    # ── Parse as Excel or CSV ─────────────────────────────────────────────
     def _try_excel(b):
-        """Try reading Excel; if first row is all Unnamed, try header=None and detect header row."""
         df = pd.read_excel(io.BytesIO(b), engine="openpyxl")
-        # Detect if headers were missed (all Unnamed columns)
         if all(str(c).startswith("Unnamed") for c in df.columns):
-            # Read without header and find the first row that looks like headers
             df_raw = pd.read_excel(io.BytesIO(b), header=None, engine="openpyxl")
             for i, row in df_raw.iterrows():
                 vals = [str(v).strip() for v in row.values if str(v).strip() not in ("", "nan")]
-                if len(vals) >= 3:  # found a meaningful header row
+                if len(vals) >= 3:
                     df = pd.read_excel(io.BytesIO(b), header=i, engine="openpyxl")
                     break
         return df
@@ -183,7 +179,6 @@ def parse_warehouse(file) -> pd.DataFrame:
     if fname.lower().endswith((".xlsx", ".xls")):
         raw = _try_excel(raw_bytes)
     else:
-        # Try Excel first, then CSV
         try:
             raw = _try_excel(raw_bytes)
         except Exception:
@@ -191,49 +186,41 @@ def parse_warehouse(file) -> pd.DataFrame:
             raw = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc,
                               encoding_errors="replace", low_memory=False)
 
-    # ── Fuzzy column matching ─────────────────────────────────────────────
-    # Build a map from normalized header → actual header in file
+    # Fuzzy column matching: normalized header → actual header
     col_norm_map = {c.strip().lower(): c for c in raw.columns}
 
-    # Canonical target → list of possible normalized names to try
     TARGETS = {
-        "SKU":       ["sku#", "sku", "item code", "article", "ref"],
-        "UPC":       ["upc/ean#", "upc", "ean", "barcode"],
-        "WH_Bin":    ["location", "bin", "bin name", "loc"],
-        "Stock_Qty": ["stock qty", "stock_qty", "qty", "quantity",
-                      "stock", "on hand", "on_hand"],
-        "Brand":     ["brand"],
-        "Type":      ["type"],
-        "Description":["description", "desc", "name"],
-        "Gender":    ["gender"],
-        "Color":     ["color", "colour"],
-        "Size":      ["size"],
+        "SKU":         ["sku#", "sku", "item code", "article", "ref"],
+        "UPC":         ["upc/ean#", "upc", "ean", "barcode"],
+        "WH_Bin":      ["location", "bin", "bin name", "loc"],
+        "Stock_Qty":   ["stock qty", "stock_qty", "qty", "quantity",
+                        "stock", "on hand", "on_hand"],
+        "Brand":       ["brand"],
+        "Type":        ["type"],
+        "Description": ["description", "desc", "name"],
+        "Gender":      ["gender"],
+        "Color":       ["color", "colour"],
+        "Size":        ["size"],
     }
 
-    rename_map = {}   # actual_col → internal_name
+    rename_map = {}
     for internal, candidates in TARGETS.items():
         for cand in candidates:
             if cand in col_norm_map:
                 actual = col_norm_map[cand]
-                if actual not in rename_map:  # first match wins
+                if actual not in rename_map:
                     rename_map[actual] = internal
                 break
 
     df = raw[list(rename_map.keys())].copy().rename(columns=rename_map)
 
-    # ── Ensure critical columns exist ─────────────────────────────────────
     if "SKU" not in df.columns:
-        raise ValueError(
-            f"Could not find SKU column. Headers found: {list(raw.columns)}"
-        )
+        raise ValueError(f"Could not find SKU column. Headers found: {list(raw.columns)}")
     if "Stock_Qty" not in df.columns:
-        raise ValueError(
-            f"Could not find Stock Qty column. Headers found: {list(raw.columns)}"
-        )
+        raise ValueError(f"Could not find Stock Qty column. Headers found: {list(raw.columns)}")
 
     df["Stock_Qty"] = _to_num(df["Stock_Qty"]).astype(int)
 
-    # Optional columns — fill with empty string if missing
     for col in ["Brand", "Description", "WH_Bin", "Type", "Gender", "Color", "Size"]:
         if col not in df.columns:
             df[col] = ""
@@ -254,22 +241,13 @@ def cross_reference(
     """
     Cross-reference warehouse stock vs Shopify inventory (CC + RR).
 
-    Definitions:
-      - 'Shopify valued' = SKU with On_Hand > 0 in ANY location in CC or RR
-      - 'Shopify Online' = On_Hand where Location == 'Online' (shared warehouse in Shopify)
-      - 'WH Stock'       = sum of Stock_Qty per SKU in master file
-
     Returns dict with keys:
-      summary       - KPI dict (counts and units)
-      matched       - SKUs present in both Shopify (valued) and WH
-      shopify_only  - SKUs with Shopify value but absent from WH
-      wh_only       - WH SKUs with Stock_Qty > 0 but absent from Shopify (valued)
+      summary, matched, shopify_only, wh_only
     """
 
     def _agg_shopify(df, total_col, online_col):
         if df is None:
-            empty = pd.DataFrame(columns=["SKU_norm", "SKU", "Title", total_col, online_col])
-            return empty
+            return pd.DataFrame(columns=["SKU_norm", "SKU", "Title", total_col, online_col])
         total = (
             df.groupby("SKU_norm")
             .agg(SKU=("SKU", "first"), Title=("Title", "first"),
@@ -280,8 +258,7 @@ def cross_reference(
         online = (
             df[df["Location"] == "Online"]
             .groupby("SKU_norm")["On_Hand"]
-            .sum()
-            .reset_index()
+            .sum().reset_index()
             .rename(columns={"On_Hand": online_col})
         )
         return total.merge(online, on="SKU_norm", how="left").fillna({online_col: 0})
@@ -289,30 +266,24 @@ def cross_reference(
     cc = _agg_shopify(cc_df, "CC_Total", "CC_Online")
     rr = _agg_shopify(rr_df, "RR_Total", "RR_Online")
 
-    # Merge CC + RR into one Shopify view
     shopify = cc.merge(
         rr[["SKU_norm", "RR_Total", "RR_Online"]],
         on="SKU_norm", how="outer"
     ).fillna({"CC_Total": 0, "RR_Total": 0, "CC_Online": 0, "RR_Online": 0})
 
-    # Fill SKU/Title from RR where CC is missing
-    if "SKU" not in shopify.columns:
-        shopify["SKU"] = ""
-    if "Title" not in shopify.columns:
-        shopify["Title"] = ""
+    if "SKU"   not in shopify.columns: shopify["SKU"]   = ""
+    if "Title" not in shopify.columns: shopify["Title"] = ""
     rr_meta = rr[["SKU_norm", "SKU", "Title"]].rename(
         columns={"SKU": "SKU_rr", "Title": "Title_rr"})
     shopify = shopify.merge(rr_meta, on="SKU_norm", how="left")
-    shopify["SKU"]   = shopify["SKU"].fillna(shopify.get("SKU_rr", ""))
+    shopify["SKU"]   = shopify["SKU"].fillna(shopify.get("SKU_rr",   ""))
     shopify["Title"] = shopify["Title"].fillna(shopify.get("Title_rr", ""))
     shopify = shopify.drop(columns=["SKU_rr", "Title_rr"], errors="ignore")
 
     shopify["Shopify_Total"]  = shopify["CC_Total"]  + shopify["RR_Total"]
     shopify["Shopify_Online"] = shopify["CC_Online"] + shopify["RR_Online"]
-
     shopify_valued = shopify[shopify["Shopify_Total"] > 0].copy()
 
-    # Warehouse aggregate
     wh_agg = (
         wh_df.groupby("SKU_norm")
         .agg(WH_SKU=("SKU", "first"), WH_Desc=("Description", "first"),
@@ -320,22 +291,18 @@ def cross_reference(
         .reset_index()
     )
 
-    # Three-way split
-    full = shopify_valued.merge(wh_agg, on="SKU_norm", how="outer", indicator=True)
+    full         = shopify_valued.merge(wh_agg, on="SKU_norm", how="outer", indicator=True)
     matched      = full[full["_merge"] == "both"].copy()
     shopify_only = full[full["_merge"] == "left_only"].copy()
-    wh_only_raw  = full[full["_merge"] == "right_only"].copy()
-    wh_only      = wh_only_raw[wh_only_raw["WH_Stock"] > 0].copy()
+    wh_only      = full[(full["_merge"] == "right_only") & (full["WH_Stock"] > 0)].copy()
 
-    # Delta: WH Stock vs Shopify Online
-    matched["WH_Stock"]      = matched["WH_Stock"].fillna(0).astype(int)
+    matched["WH_Stock"]       = matched["WH_Stock"].fillna(0).astype(int)
     matched["Shopify_Online"] = matched["Shopify_Online"].fillna(0).astype(int)
-    matched["Delta"]         = matched["WH_Stock"] - matched["Shopify_Online"]
-    matched["Delta_Status"]  = matched["Delta"].apply(
+    matched["Delta"]          = matched["WH_Stock"] - matched["Shopify_Online"]
+    matched["Delta_Status"]   = matched["Delta"].apply(
         lambda d: "✅ Match" if d == 0 else ("⬆ WH > Shopify" if d > 0 else "⬇ WH < Shopify")
     )
 
-    # Summary KPIs
     summary = {
         "shopify_cc_skus_valued": int((shopify["CC_Total"] > 0).sum()),
         "shopify_rr_skus_valued": int((shopify["RR_Total"] > 0).sum()),
@@ -353,7 +320,6 @@ def cross_reference(
         "delta_wh_lower":         int((matched["Delta"] < 0).sum()),
     }
 
-    # Display DataFrames
     matched_display = matched[[
         "SKU", "Title", "WH_SKU", "WH_Brand", "WH_Desc",
         "CC_Total", "RR_Total", "Shopify_Total",
@@ -407,9 +373,9 @@ def inventory_by_sku(inv_df: pd.DataFrame) -> pd.DataFrame:
 # ORDERS PARSER
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_orders(file) -> pd.DataFrame:
-    raw = _read_csv(file)
+    raw     = _read_csv(file)
     present = {k: v for k, v in ORD_COLS.items() if k in raw.columns}
-    df = raw.rename(columns=present)[list(present.values())].copy()
+    df      = raw.rename(columns=present)[list(present.values())].copy()
 
     for ts in ["Created_At", "Fulfilled_At", "Paid_At", "Cancelled_At"]:
         if ts in df.columns:
@@ -475,13 +441,129 @@ def check_fulfillability(ord_df: pd.DataFrame, inv_df: pd.DataFrame) -> pd.DataF
         Available_Stock=("Available","sum"),
         Incoming_Stock =("Incoming", "sum"),
     ).reset_index()
-    merged = open_lines.merge(stock, on="SKU", how="left")
-    merged["Available_Stock"]  = merged["Available_Stock"].fillna(0).astype(int)
-    merged["Incoming_Stock"]   = merged["Incoming_Stock"].fillna(0).astype(int)
-    merged["Effective_Stock"]  = merged["Available_Stock"] + merged["Incoming_Stock"]
-    merged["Can_Fulfill"]      = merged["Effective_Stock"] >= merged["Qty_Ordered"]
-    merged["Gap"]              = (merged["Qty_Ordered"] - merged["Effective_Stock"]).clip(lower=0).astype(int)
+    merged                    = open_lines.merge(stock, on="SKU", how="left")
+    merged["Available_Stock"] = merged["Available_Stock"].fillna(0).astype(int)
+    merged["Incoming_Stock"]  = merged["Incoming_Stock"].fillna(0).astype(int)
+    merged["Effective_Stock"] = merged["Available_Stock"] + merged["Incoming_Stock"]
+    merged["Can_Fulfill"]     = merged["Effective_Stock"] >= merged["Qty_Ordered"]
+    merged["Gap"]             = (merged["Qty_Ordered"] - merged["Effective_Stock"]).clip(lower=0).astype(int)
     return merged.sort_values("Can_Fulfill").reset_index(drop=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PER-LOCATION STATS  (used by Dashboard HTML)
+# ══════════════════════════════════════════════════════════════════════════════
+def _loc_stats(inv_df: pd.DataFrame):
+    grp = inv_df.groupby("Location").agg(
+        On_Hand   =("On_Hand",   "sum"),
+        Available =("Available", "sum"),
+        Committed =("Committed", "sum"),
+        Incoming  =("Incoming",  "sum"),
+    ).reset_index()
+    grand = grp["On_Hand"].sum()
+    grp["pct_total"]     = grp["On_Hand"] / grand * 100 if grand else 0
+    grp["pct_available"] = grp["Available"] / grp["On_Hand"].replace(0, 1) * 100
+    grp["pct_committed"] = grp["Committed"] / grp["On_Hand"].replace(0, 1) * 100
+    return grp[grp["On_Hand"] > 0].reset_index(drop=True), grand
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POSSIBLE SKU ERRORS — fuzzy match between WH-only and Shopify-only SKUs
+#
+# Called from app.py as:
+#   find_sku_errors(_wh_e, _sh_e)
+#
+# where _wh_e = wh_only enriched with WH_Location (via _wh_bin merge)
+# and   _sh_e = shopify_only enriched with Store + CC_Online / RR_Online
+#
+# Input columns
+# -------------
+# wh_only_df    : SKU_norm, WH_SKU, WH_Brand, WH_Desc, WH_Stock, [WH_Location]
+# shopify_only_df: SKU_norm, SKU, Title, Shopify_Online, CC_Online, RR_Online, [Store]
+#
+# Match types detected
+# --------------------
+#   Gender prefix  — WH SKU_norm starts/lacks M/W/U/K vs Shopify
+#   Leading zero   — one side has an extra leading 0
+#   Substring      — one SKU_norm contains the other (min 5 chars)
+# ══════════════════════════════════════════════════════════════════════════════
+def find_sku_errors(
+    wh_only_df: pd.DataFrame,
+    shopify_only_df: pd.DataFrame,
+) -> pd.DataFrame:
+    GENDER = ['m', 'w', 'u', 'k']
+    EMPTY_COLS = [
+        'Shopify SKU', 'Product Title', 'Store', 'Shopify Online',
+        'CC Online', 'RR Online', 'WH SKU', 'Brand', 'Description',
+        'WH Location', 'WH Stock', 'Match Type',
+    ]
+
+    if (wh_only_df is None or shopify_only_df is None
+            or wh_only_df.empty or shopify_only_df.empty):
+        return pd.DataFrame(columns=EMPTY_COLS)
+
+    # Build lookup: SKU_norm → row (Series)
+    sh_map = {str(row['SKU_norm']): row for _, row in shopify_only_df.iterrows()}
+
+    rows = []
+    for _, wh in wh_only_df.iterrows():
+        nw         = str(wh['SKU_norm'])
+        match_type = None
+        sh_row     = None
+
+        # 1. Gender prefix — strip from WH SKU_norm
+        for p in GENDER:
+            if nw.startswith(p) and nw[1:] in sh_map:
+                sh_row, match_type = sh_map[nw[1:]], f'Gender prefix ({p.upper()} stripped)'
+                break
+
+        # 2. Gender prefix — add to WH SKU_norm
+        if not match_type:
+            for p in GENDER:
+                if (p + nw) in sh_map:
+                    sh_row, match_type = sh_map[p + nw], f'Gender prefix ({p.upper()} added)'
+                    break
+
+        # 3. Leading zeros — WH has the extra zero
+        if not match_type:
+            stripped = nw.lstrip('0')
+            if stripped and stripped != nw and stripped in sh_map:
+                sh_row, match_type = sh_map[stripped], 'Leading zero (WH extra)'
+
+        # 4. Leading zeros — Shopify has the extra zero
+        if not match_type:
+            if ('0' + nw) in sh_map:
+                sh_row, match_type = sh_map['0' + nw], 'Leading zero (Shopify extra)'
+
+        # 5. Substring (min 5 chars to reduce noise)
+        if not match_type and len(nw) >= 5:
+            for sh_n, sh_r in sh_map.items():
+                if sh_n != nw and (nw in sh_n or sh_n in nw):
+                    sh_row, match_type = sh_r, 'Substring'
+                    break
+
+        if not match_type:
+            continue
+
+        rows.append({
+            'Shopify SKU':    sh_row.get('SKU',          sh_row.get('SKU_norm', '—')),
+            'Product Title':  sh_row.get('Title',        '—'),
+            'Store':          sh_row.get('Store',        '—'),
+            'Shopify Online': int(sh_row.get('Shopify_Online', 0)),
+            'CC Online':      int(sh_row.get('CC_Online',      0)),
+            'RR Online':      int(sh_row.get('RR_Online',      0)),
+            'WH SKU':         wh.get('WH_SKU',      '—'),
+            'Brand':          wh.get('WH_Brand',    '—'),
+            'Description':    wh.get('WH_Desc',     '—'),
+            'WH Location':    wh.get('WH_Location', '—'),
+            'WH Stock':       int(wh.get('WH_Stock', 0)),
+            'Match Type':     match_type,
+        })
+
+    return (
+        pd.DataFrame(rows).sort_values('WH Stock', ascending=False).reset_index(drop=True)
+        if rows else pd.DataFrame(columns=EMPTY_COLS)
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -516,200 +598,3 @@ def validate_warehouse_file(df: pd.DataFrame) -> list[str]:
     if "SKU" in df.columns and df["SKU"].astype(str).str.strip().eq("").all():
         warns.append("❌ All SKU values are empty")
     return warns
-
-# ══════════════════════════════════════════════════════════════════════════════
-# POSSIBLE SKU ERRORS — cross wh_only vs shopify_only
-# ══════════════════════════════════════════════════════════════════════════════
-
-def find_sku_errors(
-    wh_only: pd.DataFrame,       # cross_reference["wh_only"]
-    shopify_only: pd.DataFrame,  # cross_reference["shopify_only"]
-    min_len: int = 6,
-) -> pd.DataFrame:
-    """
-    Cruza WH-only contra Shopify-only buscando SKUs que probablemente
-    son el mismo producto con formato distinto.
-
-    Estrategia: containment — wh_norm ⊂ shop_norm o viceversa.
-    No requiere dependencias extra.
-
-    Retorna columnas:
-        WH_SKU | WH_Stock | Shopify_SKU | Shopify_Title |
-        Shopify_OnHand | Qty_Delta | Match_Type
-    """
-    if wh_only.empty or shopify_only.empty:
-        return pd.DataFrame()
-
-    # Normalizar los dos sets (misma función que usa el engine)
-    wh = wh_only.copy()
-    wh["_norm"] = wh["WH_SKU"].apply(normalize_sku)
-
-    sh = shopify_only.copy()
-    # columnas flexibles — app.py usa SKU/Shopify_Online/Title
-    sku_col   = "SKU"            if "SKU"            in sh.columns else "Shopify_SKU"
-    qty_col   = "Shopify_Online" if "Shopify_Online"  in sh.columns else "Shopify_On_Hand"
-    title_col = "Title"          if "Title"           in sh.columns else "Shopify_Title"
-    sh["_norm"] = sh[sku_col].apply(normalize_sku)
-
-    rows = []
-    for _, w in wh.iterrows():
-        wn = w["_norm"]
-        if len(wn) < min_len:
-            continue
-        for _, s in sh.iterrows():
-            sn = s["_norm"]
-            if len(sn) < min_len:
-                continue
-
-            if wn in sn:
-                match_type = "WH ⊂ Shopify"
-            elif sn in wn:
-                match_type = "Shopify ⊂ WH"
-            else:
-                continue
-
-            rows.append({
-                "WH_SKU":         w["WH_SKU"],
-                "WH_Stock":       int(w["WH_Stock"]),
-                "Shopify_SKU":    s[sku_col],
-                "Shopify_Title":  s.get(title_col, ""),
-                "Shopify_OnHand": int(s[qty_col]),
-                "Qty_Delta":      int(w["WH_Stock"]) - int(s[qty_col]),
-                "Match_Type":     match_type,
-            })
-    if not rows:
-        return pd.DataFrame()
-
-    return (
-        pd.DataFrame(rows)
-        .sort_values("WH_Stock", ascending=False)
-        .reset_index(drop=True)
-    )
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PER-LOCATION STATS  (used by Dashboard HTML)
-# ══════════════════════════════════════════════════════════════════════════════
-def _loc_stats(inv_df: pd.DataFrame):
-    grp = inv_df.groupby("Location").agg(
-        On_Hand   =("On_Hand",   "sum"),
-        Available =("Available", "sum"),
-        Committed =("Committed", "sum"),
-        Incoming  =("Incoming",  "sum"),
-    ).reset_index()
-    grand = grp["On_Hand"].sum()
-    grp["pct_total"]     = grp["On_Hand"] / grand * 100 if grand else 0
-    grp["pct_available"] = grp["Available"] / grp["On_Hand"].replace(0, 1) * 100
-    grp["pct_committed"] = grp["Committed"] / grp["On_Hand"].replace(0, 1) * 100
-    return grp[grp["On_Hand"] > 0].reset_index(drop=True), grand
-
-# ══════════════════════════════════════════════════════════════════════════════
-# POSSIBLE SKU ERRORS — WH SKUs with no exact Shopify match but fuzzy match
-# ══════════════════════════════════════════════════════════════════════════════
-def find_sku_errors(wh_df: pd.DataFrame, inv_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Find WH SKUs that don't exact-match any Shopify SKU but fuzzy-match
-    after normalization. Returns audit rows matching the Inventory Report
-    column format used across other tabs.
-
-    Match types detected:
-      - Normalized       : match after stripping non-alphanumeric / lowercasing
-      - Gender prefix    : WH has/lacks M/W/U/K prefix vs Shopify
-      - Leading zero     : leading zero padding difference
-    """
-    import re
-
-    def _norm(sku: str) -> str:
-        return re.sub(r'[^a-z0-9]', '', str(sku).lower())
-
-    GENDER = ['m', 'w', 'u', 'k']
-
-    # Build normalized Shopify SKU lookup
-    sh_skus   = inv_df['SKU'].dropna().astype(str).str.strip()
-    sh_skus   = sh_skus[sh_skus.ne('')].unique()
-    exact_set = set(sh_skus)
-    norm2sh   = {}          # normalized → first Shopify SKU seen
-    for s in sh_skus:
-        n = _norm(s)
-        if n and n not in norm2sh:
-            norm2sh[n] = s
-
-    # WH SKUs with no exact Shopify counterpart
-    wh_sku_col   = 'SKU#'
-    all_wh_skus  = wh_df[wh_sku_col].dropna().astype(str).str.strip()
-    unmatched_wh = [s for s in all_wh_skus[all_wh_skus.ne('')].unique()
-                    if s not in exact_set]
-
-    rows = []
-    for wh_sku in unmatched_wh:
-        nw         = _norm(wh_sku)
-        match_type = None
-        sh_sku     = None
-
-        # 1. Normalized (punctuation / case difference only)
-        if nw in norm2sh and norm2sh[nw] != wh_sku:
-            sh_sku, match_type = norm2sh[nw], 'Normalized'
-
-        # 2. Gender prefix — strip from WH side
-        if not match_type:
-            for p in GENDER:
-                if nw.startswith(p) and nw[1:] in norm2sh:
-                    sh_sku, match_type = norm2sh[nw[1:]], f'Gender prefix ({p.upper()}→stripped)'
-                    break
-
-        # 3. Gender prefix — add to WH side
-        if not match_type:
-            for p in GENDER:
-                if (p + nw) in norm2sh:
-                    sh_sku, match_type = norm2sh[p + nw], f'Gender prefix (added {p.upper()})'
-                    break
-
-        # 4. Leading zero
-        if not match_type:
-            stripped = nw.lstrip('0')
-            if stripped and stripped in norm2sh:
-                sh_sku, match_type = norm2sh[stripped], 'Leading zero (WH has extra 0)'
-            elif ('0' + nw) in norm2sh:
-                sh_sku, match_type = norm2sh['0' + nw], 'Leading zero (Shopify has extra 0)'
-
-        if not match_type:
-            continue
-
-        # WH row data
-        wh_row   = wh_df[wh_df[wh_sku_col].astype(str).str.strip() == wh_sku].iloc[0]
-        wh_brand = str(wh_row.get('Brand', '—'))
-        wh_desc  = str(wh_row.get('Description', '—'))
-        wh_loc   = str(wh_row.get('Location', '—'))
-        wh_stock = int(pd.to_numeric(wh_row.get('Stock Qty', 0), errors='coerce') or 0)
-
-        # Shopify row data
-        sh_rows     = inv_df[inv_df['SKU'] == sh_sku]
-        online_rows = sh_rows[sh_rows['Location'] == 'Online']
-        sh_title    = sh_rows['Title'].iloc[0] if not sh_rows.empty else '—'
-
-        has_store = 'Store' in online_rows.columns
-        cc_online = int(online_rows[online_rows['Store'] == 'CC']['On_Hand'].sum()) if has_store else 0
-        rr_online = int(online_rows[online_rows['Store'] == 'RR']['On_Hand'].sum()) if has_store else 0
-
-        stores = sorted(sh_rows['Store'].dropna().unique().tolist()) if has_store else []
-        store_label = ' + '.join(stores) if stores else '—'
-
-        rows.append({
-            'Shopify SKU':    sh_sku,
-            'Product Title':  sh_title,
-            'Store':          store_label,
-            'Shopify Online': cc_online + rr_online,
-            'CC Online':      cc_online,
-            'RR Online':      rr_online,
-            'WH SKU':         wh_sku,
-            'Brand':          wh_brand,
-            'Description':    wh_desc,
-            'WH Location':    wh_loc,
-            'WH Stock':       wh_stock,
-            'Match Type':     match_type,
-        })
-
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
-        'Shopify SKU','Product Title','Store','Shopify Online',
-        'CC Online','RR Online','WH SKU','Brand','Description',
-        'WH Location','WH Stock','Match Type'
-    ])
