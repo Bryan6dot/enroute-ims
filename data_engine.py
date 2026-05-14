@@ -517,7 +517,7 @@ def find_sku_errors(
 
     # ── Per-location stock pivot from full inv_df (CC + RR summed) ───────────
     # loc_pivot: SKU_norm → {location_name: on_hand_total}
-    loc_pivot: dict[str, dict[str, int]] = {}
+    loc_pivot = {}  # type: dict
     if inv_df is not None and not inv_df.empty:
         grp = (
             inv_df.groupby(["SKU_norm", "Location"])["On_Hand"]
@@ -599,7 +599,7 @@ def find_sku_errors(
 # ══════════════════════════════════════════════════════════════════════════════
 # VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
-def validate_inventory_file(df: pd.DataFrame) -> list[str]:
+def validate_inventory_file(df: pd.DataFrame) -> list:
     warns = []
     for col in ["SKU", "Location", "Available", "On_Hand"]:
         if col not in df.columns:
@@ -611,7 +611,7 @@ def validate_inventory_file(df: pd.DataFrame) -> list[str]:
     return warns
 
 
-def validate_orders_file(df: pd.DataFrame) -> list[str]:
+def validate_orders_file(df: pd.DataFrame) -> list:
     warns = []
     for col in ["Order_ID", "Fulfillment_Status", "Created_At", "SKU", "Qty_Ordered"]:
         if col not in df.columns:
@@ -619,7 +619,7 @@ def validate_orders_file(df: pd.DataFrame) -> list[str]:
     return warns
 
 
-def validate_warehouse_file(df: pd.DataFrame) -> list[str]:
+def validate_warehouse_file(df: pd.DataFrame) -> list:
     warns = []
     if "SKU" not in df.columns:
         warns.append("❌ Missing column: 'SKU#'")
