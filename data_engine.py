@@ -517,6 +517,71 @@ def validate_warehouse_file(df: pd.DataFrame) -> list[str]:
         warns.append("❌ All SKU values are empty")
     return warns
 
+# ══════════════════════════════════════════════════════════════════════════════
+# POSSIBLE SKU ERRORS — cross wh_only vs shopify_only
+# ══════════════════════════════════════════════════════════════════════════════
+
+def find_sku_errors(
+    wh_only: pd.DataFrame,       # cross_reference["wh_only"]
+    shopify_only: pd.DataFrame,  # cross_reference["shopify_only"]
+    min_len: int = 6,
+) -> pd.DataFrame:
+    """
+    Cruza WH-only contra Shopify-only buscando SKUs que probablemente
+    son el mismo producto con formato distinto.
+
+    Estrategia: containment — wh_norm ⊂ shop_norm o viceversa.
+    No requiere dependencias extra.
+
+    Retorna columnas:
+        WH_SKU | WH_Stock | Shopify_SKU | Shopify_Title |
+        Shopify_OnHand | Qty_Delta | Match_Type
+    """
+    if wh_only.empty or shopify_only.empty:
+        return pd.DataFrame()
+
+    # Normalizar los dos sets (misma función que usa el engine)
+    wh = wh_only.copy()
+    wh["_norm"] = wh["WH_SKU"].apply(normalize_sku)
+
+    sh = shopify_only.copy()
+    sh["_norm"] = sh["Shopify_SKU"].apply(normalize_sku)
+
+    rows = []
+    for _, w in wh.iterrows():
+        wn = w["_norm"]
+        if len(wn) < min_len:
+            continue
+        for _, s in sh.iterrows():
+            sn = s["_norm"]
+            if len(sn) < min_len:
+                continue
+
+            if wn in sn:
+                match_type = "WH ⊂ Shopify"          # CC agrega prefijo/sufijo
+            elif sn in wn:
+                match_type = "Shopify ⊂ WH"
+            else:
+                continue
+
+            rows.append({
+                "WH_SKU":         w["WH_SKU"],
+                "WH_Stock":       int(w["WH_Stock"]),
+                "Shopify_SKU":    s["Shopify_SKU"],
+                "Shopify_Title":  s.get("Shopify_Title", ""),
+                "Shopify_OnHand": int(s["Shopify_On_Hand"]),
+                "Qty_Delta":      int(w["WH_Stock"]) - int(s["Shopify_On_Hand"]),
+                "Match_Type":     match_type,
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("WH_Stock", ascending=False)
+        .reset_index(drop=True)
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PER-LOCATION STATS  (used by Dashboard HTML)
