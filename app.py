@@ -717,20 +717,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
                     ) if inv_rr is not None else pd.DataFrame(columns=["SKU_norm","RR Online"])
 
     # ── SKU error matching (all helpers now available) ────────────────────────
-    _wh_e = wh_only.merge(_wh_bin, on="SKU_norm", how="left")
-    _sh_e = shopify_only.copy()
-    _sh_e["Store"] = _sh_e["SKU_norm"].apply(_store_label)
-    # Ensure CC_Online / RR_Online present in shopify_only for find_sku_errors
-    if "CC_Online" not in _sh_e.columns:
-        _cc_tmp = _cc_on_by_sku.rename(columns={"CC Online": "CC_Online"})
-        _sh_e   = _sh_e.merge(_cc_tmp, on="SKU_norm", how="left")
-    if "RR_Online" not in _sh_e.columns:
-        _rr_tmp = _rr_on_by_sku.rename(columns={"RR Online": "RR_Online"})
-        _sh_e   = _sh_e.merge(_rr_tmp, on="SKU_norm", how="left")
-    _sh_e["CC_Online"] = _sh_e.get("CC_Online", pd.Series(0, index=_sh_e.index)).fillna(0).astype(int)
-    _sh_e["RR_Online"] = _sh_e.get("RR_Online", pd.Series(0, index=_sh_e.index)).fillna(0).astype(int)
-
-    sku_errors = find_sku_errors(_wh_e, _sh_e)
+    _wh_e      = wh_only.merge(_wh_bin, on="SKU_norm", how="left")
+    sku_errors = find_sku_errors(_wh_e, shopify_only, inv_df=inv_df)
     n_sku_err  = len(sku_errors)
 
     # ── Five-tab Inventory Report ────────────────────────────────────────────
@@ -925,37 +913,41 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     with tab_sku_err:
         st.caption(
             "WH SKUs with no exact Shopify match but a likely fuzzy match — "
-            "different formatting, gender prefix, or leading zeros. "
+            "gender prefix, leading zeros, or substring. "
             "Verify and correct the SKU in either system."
         )
 
         if sku_errors.empty:
             st.success("✅ No SKU mismatches detected.")
         else:
-            match_types = ["All"] + sorted(sku_errors["Match Type"].unique().tolist())
+            from data_engine import SHOPIFY_STOCK_LOCS
+            REPORT_COLS = [
+                "WH_SKU", "Shopify_SKU", "Shopify_Title", "WH_Description",
+                "WH Location",
+                *SHOPIFY_STOCK_LOCS,
+                "WH_Stock", "Shopify_OnHand", "Qty_Delta", "Match_Type",
+            ]
+
+            match_types = ["All"] + sorted(sku_errors["Match_Type"].unique().tolist())
             sel_mt   = st.selectbox("Filter by match type", match_types, key="sku_err_filter")
             view_err = (sku_errors if sel_mt == "All"
-                        else sku_errors[sku_errors["Match Type"] == sel_mt])
+                        else sku_errors[sku_errors["Match_Type"] == sel_mt])
             view_err = view_err.loc[:, ~view_err.columns.duplicated()].reset_index(drop=True)
 
-            REPORT_COLS = [
-                "Shopify SKU", "Product Title", "Store",
-                "Shopify Online", "CC Online", "RR Online",
-                "WH SKU", "Brand", "Description",
-                "WH Location", "WH Stock", "Match Type",
-            ]
             st.dataframe(
                 view_err[[c for c in REPORT_COLS if c in view_err.columns]],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Shopify Online": st.column_config.NumberColumn("Shopify Online"),
-                    "CC Online":      st.column_config.NumberColumn("CC Online"),
-                    "RR Online":      st.column_config.NumberColumn("RR Online"),
-                    "WH Stock":       st.column_config.NumberColumn("WH Stock"),
+                    **{loc: st.column_config.NumberColumn(loc)
+                       for loc in SHOPIFY_STOCK_LOCS},
+                    "WH_Stock":       st.column_config.NumberColumn("WH Stock"),
+                    "Shopify_OnHand": st.column_config.NumberColumn("Shopify On Hand"),
+                    "Qty_Delta":      st.column_config.NumberColumn("Qty Delta (WH − Shopify)",
+                                                                     format="%+d"),
                 },
             )
-            mt_counts = sku_errors["Match Type"].value_counts()
+            mt_counts = sku_errors["Match_Type"].value_counts()
             st.caption(" · ".join(f"{mt}: {cnt}" for mt, cnt in mt_counts.items()))
             st.download_button(
                 "⬇️ Export CSV",
