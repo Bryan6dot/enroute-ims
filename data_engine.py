@@ -601,3 +601,115 @@ def _loc_stats(inv_df: pd.DataFrame):
     grp["pct_available"] = grp["Available"] / grp["On_Hand"].replace(0, 1) * 100
     grp["pct_committed"] = grp["Committed"] / grp["On_Hand"].replace(0, 1) * 100
     return grp[grp["On_Hand"] > 0].reset_index(drop=True), grand
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POSSIBLE SKU ERRORS — WH SKUs with no exact Shopify match but fuzzy match
+# ══════════════════════════════════════════════════════════════════════════════
+def find_sku_errors(wh_df: pd.DataFrame, inv_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Find WH SKUs that don't exact-match any Shopify SKU but fuzzy-match
+    after normalization. Returns audit rows matching the Inventory Report
+    column format used across other tabs.
+
+    Match types detected:
+      - Normalized       : match after stripping non-alphanumeric / lowercasing
+      - Gender prefix    : WH has/lacks M/W/U/K prefix vs Shopify
+      - Leading zero     : leading zero padding difference
+    """
+    import re
+
+    def _norm(sku: str) -> str:
+        return re.sub(r'[^a-z0-9]', '', str(sku).lower())
+
+    GENDER = ['m', 'w', 'u', 'k']
+
+    # Build normalized Shopify SKU lookup
+    sh_skus   = inv_df['SKU'].dropna().astype(str).str.strip()
+    sh_skus   = sh_skus[sh_skus.ne('')].unique()
+    exact_set = set(sh_skus)
+    norm2sh   = {}          # normalized → first Shopify SKU seen
+    for s in sh_skus:
+        n = _norm(s)
+        if n and n not in norm2sh:
+            norm2sh[n] = s
+
+    # WH SKUs with no exact Shopify counterpart
+    wh_sku_col   = 'SKU#'
+    all_wh_skus  = wh_df[wh_sku_col].dropna().astype(str).str.strip()
+    unmatched_wh = [s for s in all_wh_skus[all_wh_skus.ne('')].unique()
+                    if s not in exact_set]
+
+    rows = []
+    for wh_sku in unmatched_wh:
+        nw         = _norm(wh_sku)
+        match_type = None
+        sh_sku     = None
+
+        # 1. Normalized (punctuation / case difference only)
+        if nw in norm2sh and norm2sh[nw] != wh_sku:
+            sh_sku, match_type = norm2sh[nw], 'Normalized'
+
+        # 2. Gender prefix — strip from WH side
+        if not match_type:
+            for p in GENDER:
+                if nw.startswith(p) and nw[1:] in norm2sh:
+                    sh_sku, match_type = norm2sh[nw[1:]], f'Gender prefix ({p.upper()}→stripped)'
+                    break
+
+        # 3. Gender prefix — add to WH side
+        if not match_type:
+            for p in GENDER:
+                if (p + nw) in norm2sh:
+                    sh_sku, match_type = norm2sh[p + nw], f'Gender prefix (added {p.upper()})'
+                    break
+
+        # 4. Leading zero
+        if not match_type:
+            stripped = nw.lstrip('0')
+            if stripped and stripped in norm2sh:
+                sh_sku, match_type = norm2sh[stripped], 'Leading zero (WH has extra 0)'
+            elif ('0' + nw) in norm2sh:
+                sh_sku, match_type = norm2sh['0' + nw], 'Leading zero (Shopify has extra 0)'
+
+        if not match_type:
+            continue
+
+        # WH row data
+        wh_row   = wh_df[wh_df[wh_sku_col].astype(str).str.strip() == wh_sku].iloc[0]
+        wh_brand = str(wh_row.get('Brand', '—'))
+        wh_desc  = str(wh_row.get('Description', '—'))
+        wh_loc   = str(wh_row.get('Location', '—'))
+        wh_stock = int(pd.to_numeric(wh_row.get('Stock Qty', 0), errors='coerce') or 0)
+
+        # Shopify row data
+        sh_rows     = inv_df[inv_df['SKU'] == sh_sku]
+        online_rows = sh_rows[sh_rows['Location'] == 'Online']
+        sh_title    = sh_rows['Title'].iloc[0] if not sh_rows.empty else '—'
+
+        has_store = 'Store' in online_rows.columns
+        cc_online = int(online_rows[online_rows['Store'] == 'CC']['On_Hand'].sum()) if has_store else 0
+        rr_online = int(online_rows[online_rows['Store'] == 'RR']['On_Hand'].sum()) if has_store else 0
+
+        stores = sorted(sh_rows['Store'].dropna().unique().tolist()) if has_store else []
+        store_label = ' + '.join(stores) if stores else '—'
+
+        rows.append({
+            'Shopify SKU':    sh_sku,
+            'Product Title':  sh_title,
+            'Store':          store_label,
+            'Shopify Online': cc_online + rr_online,
+            'CC Online':      cc_online,
+            'RR Online':      rr_online,
+            'WH SKU':         wh_sku,
+            'Brand':          wh_brand,
+            'Description':    wh_desc,
+            'WH Location':    wh_loc,
+            'WH Stock':       wh_stock,
+            'Match Type':     match_type,
+        })
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+        'Shopify SKU','Product Title','Store','Shopify Online',
+        'CC Online','RR Online','WH SKU','Brand','Description',
+        'WH Location','WH Stock','Match Type'
+    ])
